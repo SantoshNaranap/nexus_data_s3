@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+JIRA MCP Server
+
+Provides MCP tools for interacting with JIRA issues and projects.
+"""
+
+import json
+import logging
+import os
+from typing import Any
+
+from jira import JIRA
+from jira.exceptions import JIRAError
+from mcp.server import Server
+from mcp.types import Tool, TextContent
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("jira-mcp-server")
+
+# Initialize JIRA client
+jira_client = JIRA(
+    server=os.getenv("JIRA_URL"),
+    basic_auth=(os.getenv("JIRA_EMAIL"), os.getenv("JIRA_API_TOKEN")),
+)
+
+# Create MCP server
+app = Server("jira-connector")
+
+
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    """List all available JIRA tools."""
+    return [
+        Tool(
+            name="search_issues",
+            description="""Search for JIRA issues using JQL (JIRA Query Language).
+
+Common JQL examples:
+- Count open issues: 'status = Open' or 'status != Closed'
+- Issues by assignee: 'assignee = "John Doe"' or 'assignee in (user1, user2)'
+- Issues by project: 'project = PROJECTKEY'
+- Multiple conditions: 'project = PROJ AND status = "In Progress" AND assignee = currentUser()'
+- Recent updates: 'updated >= -7d' (last 7 days)
+- By priority: 'priority = High'
+- Unassigned: 'assignee is EMPTY'
+
+Always start with 'project = PROJECTKEY' if you know the project.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jql": {
+                        "type": "string",
+                        "description": "JQL query string. REQUIRED. Cannot be empty. Example: 'status = Open' to get all open issues",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of issues to return (default: 50)",
+                        "default": 50,
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Comma-separated fields to return (default: key,summary,status,assignee)",
+                    },
+                },
+                "required": ["jql"],
+            },
+        ),
+        Tool(
+            name="get_issue",
+            description="Get detailed information about a specific JIRA issue",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "The issue key (e.g., 'PROJ-123')",
+                    },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        Tool(
+            name="create_issue",
+            description="Create a new JIRA issue",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project key",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Issue summary/title",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Issue description",
+                    },
+                    "issue_type": {
+                        "type": "string",
+                        "description": "Issue type (e.g., 'Bug', 'Task', 'Story')",
+                        "default": "Task",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "Priority (e.g., 'High', 'Medium', 'Low')",
+                    },
+                },
+                "required": ["project", "summary", "description"],
+            },
+        ),
+        Tool(
+            name="update_issue",
+            description="Update a JIRA issue",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "The issue key to update",
+                    },
+                    "fields": {
+                        "type": "object",
+                        "description": "Fields to update (e.g., {summary: 'New summary', description: 'New description'})",
+                    },
+                },
+                "required": ["issue_key", "fields"],
+            },
+        ),
+        Tool(
+            name="list_projects",
+            description="List all JIRA projects accessible to the user. Use this FIRST to discover available project keys before searching for issues.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_project",
+            description="Get detailed information about a specific JIRA project including its description and lead",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_key": {
+                        "type": "string",
+                        "description": "The project key (e.g., 'PROJ', 'KAAY'). Get this from list_projects first.",
+                    },
+                },
+                "required": ["project_key"],
+            },
+        ),
+        Tool(
+            name="add_comment",
+            description="Add a comment to an issue",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "The issue key",
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "The comment text",
+                    },
+                },
+                "required": ["issue_key", "comment"],
+            },
+        ),
+    ]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: Any) -> list[TextContent]:
+    """Handle tool calls."""
+    try:
+        if name == "search_issues":
+            return await handle_search_issues(arguments)
+        elif name == "get_issue":
+            return await handle_get_issue(arguments)
+        elif name == "create_issue":
+            return await handle_create_issue(arguments)
+        elif name == "update_issue":
+            return await handle_update_issue(arguments)
+        elif name == "list_projects":
+            return await handle_list_projects()
+        elif name == "get_project":
+            return await handle_get_project(arguments)
+        elif name == "add_comment":
+            return await handle_add_comment(arguments)
+        else:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    except JIRAError as e:
+        logger.error(f"JIRA error in {name}: {str(e)}")
+        return [TextContent(type="text", text=f"JIRA Error: {str(e)}")]
+    except Exception as e:
+        logger.error(f"Unexpected error in {name}: {str(e)}")
+        return [TextContent(type="text", text=f"Unexpected error: {str(e)}")]
+
+
+async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
+    """Search for issues using JQL."""
+    jql = arguments["jql"]
+    max_results = arguments.get("max_results", 50)
+    fields = arguments.get("fields", "key,summary,status,assignee")
+
+    issues = jira_client.search_issues(jql, maxResults=max_results, fields=fields)
+
+    results = []
+    for issue in issues:
+        issue_data = {
+            "key": issue.key,
+            "summary": issue.fields.summary,
+            "status": issue.fields.status.name,
+        }
+        if hasattr(issue.fields, "assignee") and issue.fields.assignee:
+            issue_data["assignee"] = issue.fields.assignee.displayName
+
+        results.append(issue_data)
+
+    result = {
+        "jql": jql,
+        "total": len(results),
+        "issues": results,
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get detailed issue information."""
+    issue_key = arguments["issue_key"]
+    issue = jira_client.issue(issue_key)
+
+    result = {
+        "key": issue.key,
+        "summary": issue.fields.summary,
+        "description": issue.fields.description,
+        "status": issue.fields.status.name,
+        "priority": issue.fields.priority.name if issue.fields.priority else None,
+        "created": issue.fields.created,
+        "updated": issue.fields.updated,
+        "reporter": issue.fields.reporter.displayName,
+        "assignee": issue.fields.assignee.displayName if issue.fields.assignee else None,
+        "labels": issue.fields.labels,
+        "comments": [
+            {"author": comment.author.displayName, "body": comment.body, "created": comment.created}
+            for comment in issue.fields.comment.comments
+        ],
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+async def handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    """Create a new issue."""
+    project = arguments["project"]
+    summary = arguments["summary"]
+    description = arguments["description"]
+    issue_type = arguments.get("issue_type", "Task")
+    priority = arguments.get("priority")
+
+    issue_dict = {
+        "project": {"key": project},
+        "summary": summary,
+        "description": description,
+        "issuetype": {"name": issue_type},
+    }
+
+    if priority:
+        issue_dict["priority"] = {"name": priority}
+
+    new_issue = jira_client.create_issue(fields=issue_dict)
+
+    result = {
+        "key": new_issue.key,
+        "summary": summary,
+        "url": f"{jira_client.server_url}/browse/{new_issue.key}",
+        "status": "created",
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    """Update an existing issue."""
+    issue_key = arguments["issue_key"]
+    fields = arguments["fields"]
+
+    issue = jira_client.issue(issue_key)
+    issue.update(fields=fields)
+
+    result = {
+        "key": issue_key,
+        "updated_fields": list(fields.keys()),
+        "status": "updated",
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_list_projects() -> list[TextContent]:
+    """List all projects."""
+    projects = jira_client.projects()
+
+    results = [
+        {
+            "key": project.key,
+            "name": project.name,
+            "lead": project.lead.displayName if hasattr(project, "lead") else None,
+        }
+        for project in projects
+    ]
+
+    result = {
+        "count": len(results),
+        "projects": results,
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_get_project(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get project details."""
+    project_key = arguments["project_key"]
+    project = jira_client.project(project_key)
+
+    result = {
+        "key": project.key,
+        "name": project.name,
+        "description": project.description if hasattr(project, "description") else None,
+        "lead": project.lead.displayName if hasattr(project, "lead") else None,
+        "url": project.self,
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
+    """Add a comment to an issue."""
+    issue_key = arguments["issue_key"]
+    comment_text = arguments["comment"]
+
+    comment = jira_client.add_comment(issue_key, comment_text)
+
+    result = {
+        "issue_key": issue_key,
+        "comment_id": comment.id,
+        "author": comment.author.displayName,
+        "created": comment.created,
+        "status": "added",
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+def main():
+    """Run the JIRA MCP server."""
+    import asyncio
+    from mcp.server.stdio import stdio_server
+
+    async def run():
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
+
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

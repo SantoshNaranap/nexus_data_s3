@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(npm pkg:*)",
+      "Bash(tree:*)",
+      "Bash(pip install:*)",
+      "Bash(cat:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(timeout 20 curl:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)",
+      "Bash(npm install:*)",
+      "Bash(nc:*)",
+      "Bash(if [ -f /tmp/mysql_comprehensive_output.txt ])",
+      "Bash(then cat /tmp/mysql_comprehensive_output.txt)",
+      "Bash(else echo \"Output file not found\")",
+      "Bash(fi)",
+      "Bash(source venv/bin/activate)",
+      "Bash(python -m uvicorn:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
