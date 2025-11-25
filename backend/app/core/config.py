@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     shopify_access_token: str = ""
     shopify_api_version: str = "2024-01"
 
+    # Google Workspace (OAuth)
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    user_google_email: str = ""  # Optional: for single-user mode
+
     # Logging
     log_level: str = "INFO"
 

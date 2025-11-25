@@ -69,6 +69,23 @@ class MCPService:
                     "SHOPIFY_API_VERSION": settings.shopify_api_version,
                 },
             },
+            "google_workspace": {
+                "name": "Google Workspace",
+                "description": "Access Google Docs, Sheets, Drive, Gmail, Calendar, and more",
+                "command": python_cmd,
+                "args": [
+                    os.path.abspath("../connectors/google_workspace/main.py"),
+                    "--tool-tier", "core",  # Use core tools (Docs, Sheets, Drive, Calendar, Gmail)
+                    "--single-user"  # Simplified authentication for single user
+                ],
+                "env": {
+                    "GOOGLE_OAUTH_CLIENT_ID": settings.google_oauth_client_id,
+                    "GOOGLE_OAUTH_CLIENT_SECRET": settings.google_oauth_client_secret,
+                    "USER_GOOGLE_EMAIL": settings.user_google_email,
+                    "WORKSPACE_MCP_PORT": "8001",  # Use port 8001 to avoid conflict with FastAPI on 8000
+                    "OAUTHLIB_INSECURE_TRANSPORT": "1",  # For development
+                },
+            },
         }
         self._active_clients: Dict[str, tuple] = {}
 

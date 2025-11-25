@@ -352,30 +352,14 @@ class ChatService:
         # Create system prompt
         system_prompt = self._create_system_prompt(datasource)
 
-        # Process with streaming Claude - Smooth character-by-character streaming
+        # Process with streaming Claude - True character-by-character streaming like ChatGPT
         full_response = ""
-        char_buffer = ""
 
         async for chunk in self._call_claude_stream(messages, tools, system_prompt, datasource):
             full_response += chunk
-            # Buffer 1-2 characters for smoother streaming (avoid single-char network overhead)
-            char_buffer += chunk
-
-            # Flush buffer when we have a few characters or hit word boundaries
-            while len(char_buffer) >= 2 or (char_buffer and chunk.endswith((' ', '\n', '.', ',', '!', '?'))):
-                if len(char_buffer) >= 2:
-                    # Send 2 characters at a time for smooth streaming
-                    yield char_buffer[:2]
-                    char_buffer = char_buffer[2:]
-                else:
-                    # Send remaining buffer at word boundaries
-                    yield char_buffer
-                    char_buffer = ""
-                    break
-
-        # Flush any remaining characters
-        if char_buffer:
-            yield char_buffer
+            # Send each character immediately for smooth ChatGPT-like streaming
+            for char in chunk:
+                yield char
 
         # Add assistant message to history
         messages.append({"role": "assistant", "content": full_response})
@@ -464,6 +448,28 @@ S3-SPECIFIC GUIDELINES:
    - "Read file [name]" → First call list_objects to find the exact key, then read_object with exact key
 7. **ALWAYS provide the bucket name** when calling any S3 tool except list_buckets
 8. **When user mentions a specific bucket name**, use that exact name in the bucket parameter
+"""
+
+        # Add Google Workspace-specific guidance
+        if datasource == "google_workspace":
+            from app.core.config import settings
+            email_info = f" (configured as: {settings.user_google_email})" if settings.user_google_email else ""
+            base_prompt += f"""
+
+GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
+1. **User email is pre-configured{email_info}** - DO NOT ask the user for their email address
+2. **Directly call tools** when the user asks about their Google data (Docs, Sheets, Drive, Calendar, Gmail, etc.)
+3. **Common user requests:**
+   - "Show me my Google Docs" → Call search_drive_files with mimeType filter
+   - "What's on my calendar?" → Call get_events
+   - "Show my recent emails" → Call list_messages
+   - "List my spreadsheets" → Call search_drive_files with Sheets mimeType
+   - "What files are in Drive?" → Call search_drive_files
+4. **OAuth Authorization:**
+   - On first use, tools may require OAuth authorization
+   - The system will automatically initiate the OAuth flow
+   - Follow any authorization instructions provided by the tools
+5. **Always use tools first** - don't ask for the email, just call the appropriate tool directly
 """
 
         return base_prompt
@@ -583,6 +589,18 @@ S3-SPECIFIC GUIDELINES:
                                 logger.info(f"✅ Auto-injected table parameter: {table_name}")
                             else:
                                 logger.warning(f"⚠️ Failed to extract table name")
+
+                # Auto-inject user_google_email for Google Workspace tools
+                if datasource == "google_workspace":
+                    from app.core.config import settings
+                    current_email = tool_use.input.get("user_google_email", "")
+                    # Replace if missing, invalid, or placeholder
+                    is_invalid = not current_email or "@" not in current_email or "placeholder" in current_email.lower()
+                    if is_invalid and settings.user_google_email:
+                        tool_use.input["user_google_email"] = settings.user_google_email
+                        logger.info(f"✅ Auto-injected user_google_email: {settings.user_google_email} (replaced: {current_email})")
+                    elif is_invalid:
+                        logger.warning(f"⚠️ USER_GOOGLE_EMAIL not configured in settings")
 
                 logger.info(f"Claude calling tool: {tool_use.name} with args: {tool_use.input}")
 

@@ -1,25 +1,37 @@
 # ConnectorMCP - Multi-Source Data Connector with Natural Language Interface
 
-A production-level application that enables natural language interaction with multiple data sources (Amazon S3, MySQL, JIRA, Shopify) through the Model Context Protocol (MCP) and Anthropic Claude.
+A production-level application that enables natural language interaction with multiple data sources (Amazon S3, MySQL, JIRA, Shopify, Google Workspace) through the Model Context Protocol (MCP) and Anthropic Claude.
 
 ## Features
 
 - 🤖 **Natural Language Queries**: Chat with your data sources using plain English
-- 🔌 **Multiple Data Sources**: Support for S3, MySQL, JIRA, and Shopify
+- 🔌 **Multiple Data Sources**: Support for S3, MySQL, JIRA, Shopify, and Google Workspace
 - 🎯 **MCP Integration**: Each connector is a standalone MCP server
 - 🚀 **Production Ready**: Comprehensive tests, Docker support, and production architecture
 - 📦 **Modular Design**: Each connector can be exported and used independently
-- 💬 **Modern UI**: React + TypeScript frontend with real-time chat interface
+- 💬 **Modern UI**: React + TypeScript frontend with Google Material Design aesthetic
+- 🌓 **Dark/Light Mode**: Seamless theme switching with user preference persistence
 
 ## Architecture
 
 The application consists of three main layers:
 
-1. **Frontend**: React + TypeScript chat interface
+1. **Frontend**: React + TypeScript chat interface with Google Material Design
 2. **Backend**: FastAPI service that orchestrates MCP clients and Claude AI
 3. **MCP Connectors**: Independent Python-based MCP servers for each data source
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed architecture documentation.
+
+## UI/UX Design
+
+The frontend features a clean, modern interface inspired by Google Material Design:
+
+- **Google Material Design**: Clean borders, subtle shadows, appropriate spacing
+- **Dark/Light Mode**: Toggle between themes with smooth transitions
+- **Theme Persistence**: User preferences saved in browser localStorage
+- **Responsive Layout**: Optimized for desktop and tablet viewing
+- **Real-time Streaming**: Live chat responses with typing indicators
+- **Accessible**: Semantic HTML and ARIA labels throughout
 
 ## Prerequisites
 
@@ -62,7 +74,13 @@ JIRA_API_TOKEN=your_token
 
 SHOPIFY_SHOP_URL=your-shop.myshopify.com
 SHOPIFY_ACCESS_TOKEN=your_token
+
+GOOGLE_OAUTH_CLIENT_ID=your_client_id.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=your_client_secret
+USER_GOOGLE_EMAIL=your_email@gmail.com
 ```
+
+> **Note**: For Google Workspace setup, see [GOOGLE_WORKSPACE_SETUP.md](./GOOGLE_WORKSPACE_SETUP.md) for detailed OAuth 2.0 configuration instructions.
 
 ### 3. Install Dependencies
 
@@ -97,6 +115,10 @@ pip install -e .
 
 # Shopify Connector
 cd connectors/shopify
+pip install -e .
+
+# Google Workspace Connector
+cd connectors/google_workspace
 pip install -e .
 ```
 
@@ -156,6 +178,13 @@ Open your browser and navigate to:
 - "Show me all products"
 - "Get orders from last week"
 - "What's the inventory level for product 12345?"
+
+#### Google Workspace
+- "Show me my recent Google Docs"
+- "List my spreadsheets"
+- "What's on my calendar today?"
+- "Search for emails from john@example.com"
+- "Create a new document called 'Meeting Notes'"
 
 ## Testing
 
@@ -218,7 +247,8 @@ ConnectorMCP/
 │   ├── s3/             # S3 connector
 │   ├── mysql/          # MySQL connector
 │   ├── jira/           # JIRA connector
-│   └── shopify/        # Shopify connector
+│   ├── shopify/        # Shopify connector
+│   └── google_workspace/ # Google Workspace connector
 │
 ├── docs/               # Additional documentation
 ├── ARCHITECTURE.md     # Architecture documentation
