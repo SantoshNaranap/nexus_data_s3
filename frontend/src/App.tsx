@@ -41,10 +41,10 @@ function AppContent() {
                 </div>
                 <div>
                   <h1 className="text-xl font-normal text-gray-700 dark:text-gray-200">
-                    ConnectorMCP
+                    Mosaic
                   </h1>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Multi-Source Data Connector
+                    by Kaay
                   </p>
                 </div>
               </div>
@@ -84,10 +84,10 @@ function AppContent() {
               </div>
 
               <h2 className="text-4xl font-normal mb-3 text-gray-900 dark:text-white">
-                Welcome to ConnectorMCP
+                Welcome to Mosaic
               </h2>
               <p className="text-lg text-gray-600 dark:text-gray-400 mb-12">
-                Select a data source from the sidebar to start chatting with your data
+                Your unified interface for all data sources
               </p>
 
               {/* Google-style feature cards */}

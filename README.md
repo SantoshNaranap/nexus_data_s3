@@ -1,6 +1,8 @@
-# ConnectorMCP - Multi-Source Data Connector with Natural Language Interface
+# Mosaic by Kaay - Multi-Source Data Connector with Natural Language Interface
 
 A production-level application that enables natural language interaction with multiple data sources (Amazon S3, MySQL, JIRA, Shopify, Google Workspace) through the Model Context Protocol (MCP) and Anthropic Claude.
+
+**Mosaic** brings together different data sources into one unified, beautiful interface - like pieces of a mosaic creating a complete picture.
 
 ## Features
 
