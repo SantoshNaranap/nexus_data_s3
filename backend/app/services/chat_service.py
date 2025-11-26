@@ -3,6 +3,7 @@
 import logging
 from typing import List, Dict, Any, AsyncGenerator
 import json
+import random
 from anthropic import Anthropic
 from anthropic.types import ToolUseBlock, TextBlock, MessageStreamEvent
 
@@ -10,6 +11,79 @@ from app.core.config import settings
 from app.services.mcp_service import mcp_service
 
 logger = logging.getLogger(__name__)
+
+
+def get_quirky_thinking_message(tool_name: str) -> str:
+    """Generate fun, quirky thinking messages based on tool name."""
+
+    # Mapping of tool patterns to quirky messages
+    quirky_messages = {
+        "list": [
+            "🔍 *Rummaging through the digital filing cabinet...*",
+            "📋 *Checking what's in the treasure chest...*",
+            "🗂️ *Flipping through the catalog...*",
+            "👀 *Taking a peek at what we've got...*",
+        ],
+        "read": [
+            "📖 *Opening the scroll...*",
+            "👓 *Adjusting my reading glasses...*",
+            "📰 *Unfolding the ancient manuscript...*",
+            "🔎 *Examining the contents closely...*",
+        ],
+        "search": [
+            "🔍 *Channeling my inner detective...*",
+            "🕵️ *On the hunt...*",
+            "🎯 *Searching high and low...*",
+            "🔎 *Following the breadcrumbs...*",
+        ],
+        "get": [
+            "🎣 *Fetching that for you...*",
+            "📦 *Retrieving from the vault...*",
+            "🏃 *Running to get it...*",
+            "🤲 *Grabbing that data...*",
+        ],
+        "create": [
+            "✨ *Conjuring something new...*",
+            "🎨 *Creating a masterpiece...*",
+            "🔨 *Building that for you...*",
+            "🪄 *Making magic happen...*",
+        ],
+        "update": [
+            "✏️ *Making some tweaks...*",
+            "🔧 *Fine-tuning this...*",
+            "📝 *Updating the records...*",
+            "🔄 *Applying the changes...*",
+        ],
+        "delete": [
+            "🗑️ *To the trash it goes...*",
+            "💥 *Removing that...*",
+            "🧹 *Cleaning up...*",
+            "👋 *Saying goodbye...*",
+        ],
+        "query": [
+            "🤔 *Pondering this question...*",
+            "💭 *Consulting the oracle...*",
+            "🔮 *Peering into the database...*",
+            "📊 *Crunching the numbers...*",
+        ],
+    }
+
+    # Find matching pattern
+    tool_lower = tool_name.lower()
+    for pattern, messages in quirky_messages.items():
+        if pattern in tool_lower:
+            return random.choice(messages)
+
+    # Default quirky messages if no pattern matches
+    default_messages = [
+        "🤖 *Processing...*",
+        "⚙️ *Working on it...*",
+        "💫 *Making it happen...*",
+        "🎯 *On it...*",
+        "✨ *Working some magic...*",
+    ]
+
+    return random.choice(default_messages)
 
 
 class ChatService:
@@ -786,8 +860,8 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
                             else:
                                 logger.warning(f"⚠️ Failed to extract table name")
 
-                # Show tool execution feedback
-                tool_feedback = f"[Using {tool_use.name}..."
+                # Show tool execution feedback with quirky message
+                tool_feedback = get_quirky_thinking_message(tool_use.name)
                 yield tool_feedback
 
                 logger.info(f"Claude calling tool: {tool_use.name} with args: {tool_use.input}")
