@@ -10,6 +10,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp?: string;
+  responseTime?: number; // Time in milliseconds
 }
 
 export interface ChatRequest {

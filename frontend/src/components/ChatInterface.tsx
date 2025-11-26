@@ -55,6 +55,8 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     setIsStreaming(true)
     setStreamingMessage('')
 
+    // Track start time for response timing
+    const startTime = performance.now()
     let accumulatedMessage = ''
 
     try {
@@ -75,12 +77,17 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
         },
         // onDone
         () => {
+          // Calculate response time
+          const endTime = performance.now()
+          const responseTime = endTime - startTime
+
           setMessages((prev) => [
             ...prev,
             {
               role: 'assistant',
               content: accumulatedMessage,
               timestamp: new Date().toISOString(),
+              responseTime,
             },
           ])
           setStreamingMessage('')
@@ -203,8 +210,18 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
                 <MarkdownMessage content={message.content} />
               )}
               {message.timestamp && (
-                <div className="text-xs opacity-60 mt-3">
-                  {new Date(message.timestamp).toLocaleTimeString()}
+                <div className="text-xs opacity-60 mt-3 flex items-center gap-2">
+                  <span>{new Date(message.timestamp).toLocaleTimeString()}</span>
+                  {message.responseTime && (
+                    <>
+                      <span>•</span>
+                      <span className="text-green-600 dark:text-green-400">
+                        {message.responseTime < 1000
+                          ? `${Math.round(message.responseTime)}ms`
+                          : `${(message.responseTime / 1000).toFixed(1)}s`}
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
             </div>
