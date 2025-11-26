@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { chatApi } from '../services/api'
 import type { DataSource, ChatMessage } from '../types'
+import MarkdownMessage from './MarkdownMessage'
 
 interface ChatInterfaceProps {
   datasource: DataSource
@@ -186,7 +187,7 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
             }`}
           >
             <div
-              className={`max-w-3xl rounded-2xl px-5 py-3 ${
+              className={`max-w-3xl rounded-2xl px-5 py-4 ${
                 message.role === 'user'
                   ? 'bg-blue-600 text-white'
                   : message.content.startsWith('Error:')
@@ -194,11 +195,15 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
                   : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
               } transition-colors duration-200`}
             >
-              <div className="whitespace-pre-wrap break-words leading-relaxed text-sm">
-                {message.content}
-              </div>
+              {message.role === 'user' ? (
+                <div className="whitespace-pre-wrap break-words leading-relaxed text-sm">
+                  {message.content}
+                </div>
+              ) : (
+                <MarkdownMessage content={message.content} />
+              )}
               {message.timestamp && (
-                <div className="text-xs opacity-60 mt-2">
+                <div className="text-xs opacity-60 mt-3">
                   {new Date(message.timestamp).toLocaleTimeString()}
                 </div>
               )}
@@ -208,10 +213,10 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
 
         {streamingMessage && (
           <div className="flex justify-start">
-            <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-2xl px-5 py-3 max-w-3xl border border-gray-200 dark:border-gray-700 transition-colors duration-200">
-              <div className="whitespace-pre-wrap break-words leading-relaxed text-sm">
-                {streamingMessage}
-                <span className="inline-block w-0.5 h-4 bg-blue-600 dark:bg-blue-400 ml-1 animate-pulse"></span>
+            <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-2xl px-5 py-4 max-w-3xl border border-gray-200 dark:border-gray-700 transition-colors duration-200">
+              <div className="relative">
+                <MarkdownMessage content={streamingMessage} />
+                <span className="inline-block w-0.5 h-4 bg-blue-600 dark:bg-blue-400 ml-1 animate-pulse align-middle"></span>
               </div>
             </div>
           </div>
