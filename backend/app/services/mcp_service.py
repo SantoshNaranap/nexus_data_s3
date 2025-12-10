@@ -498,6 +498,7 @@ class MCPService:
             "get_events", "list_messages", "search_drive_files",  # Google Workspace
             "list_channels", "get_channel_info", "read_messages", "search_messages",  # Slack
             "list_users", "get_user_info", "get_user_presence", "get_thread_replies", "list_files",  # Slack
+            "read_dm_with_user", "get_user_messages_in_channel", "list_dms", "search_in_dms", "get_channel_activity",  # Slack DM/Conversation
         ]
 
         cache_key = None

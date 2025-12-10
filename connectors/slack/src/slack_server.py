@@ -9,7 +9,7 @@ Uses the Slack Web API via slack_sdk.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from slack_sdk import WebClient
@@ -373,6 +373,142 @@ Filter by channel, user, or file type.""",
                 "required": [],
             },
         ),
+
+        # DM/Conversation tools
+        Tool(
+            name="read_dm_with_user",
+            description="""Read direct message conversation with a specific user.
+
+Use this to:
+- Get conversation history between you and another person
+- Summarize discussions with a colleague
+- Find messages exchanged with someone
+
+Supports date filtering to narrow down to specific time periods.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "string",
+                        "description": "User name, real name, email, or ID to get DM history with",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of messages to retrieve (default: 50, max: 200)",
+                        "default": 50,
+                    },
+                    "days_ago": {
+                        "type": "integer",
+                        "description": "Only get messages from the last N days (default: all)",
+                    },
+                    "since_date": {
+                        "type": "string",
+                        "description": "Get messages since this date (YYYY-MM-DD format)",
+                    },
+                },
+                "required": ["user"],
+            },
+        ),
+        Tool(
+            name="get_user_messages_in_channel",
+            description="""Get all messages from a specific user in a channel.
+
+Use this to:
+- See what someone has said in a channel
+- Track a person's contributions to a discussion
+- Find messages from a specific colleague
+
+Supports date filtering.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel name or ID",
+                    },
+                    "user": {
+                        "type": "string",
+                        "description": "User name, real name, email, or ID",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to scan (default: 100, max: 500)",
+                        "default": 100,
+                    },
+                    "days_ago": {
+                        "type": "integer",
+                        "description": "Only get messages from the last N days",
+                    },
+                },
+                "required": ["channel", "user"],
+            },
+        ),
+        Tool(
+            name="list_dms",
+            description="""List all direct message conversations.
+
+Returns a list of all DM channels with the user you're chatting with.
+Useful for discovering who you've been messaging.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max DMs to return (default: 50)",
+                        "default": 50,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="search_in_dms",
+            description="""Search for specific content across all your direct messages.
+
+Use this to:
+- Find credentials, passwords, or API keys someone sent you
+- Search for specific information shared privately
+- Find links or files shared in DMs
+
+Searches across ALL your DM conversations.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (e.g., 'mysql password', 'API key', 'credentials')",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default: 30)",
+                        "default": 30,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_channel_activity",
+            description="""Get a summary of recent activity in a channel.
+
+Use this to quickly understand what's been happening in a channel.
+Returns message count, active users, and key discussion topics.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel name or ID",
+                    },
+                    "days_ago": {
+                        "type": "integer",
+                        "description": "Look at activity from the last N days (default: 7)",
+                        "default": 7,
+                    },
+                },
+                "required": ["channel"],
+            },
+        ),
     ]
 
 
@@ -404,6 +540,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return await handle_add_reaction(arguments)
         elif name == "list_files":
             return await handle_list_files(arguments)
+        # New DM/conversation tools
+        elif name == "read_dm_with_user":
+            return await handle_read_dm_with_user(arguments)
+        elif name == "get_user_messages_in_channel":
+            return await handle_get_user_messages_in_channel(arguments)
+        elif name == "list_dms":
+            return await handle_list_dms(arguments)
+        elif name == "search_in_dms":
+            return await handle_search_in_dms(arguments)
+        elif name == "get_channel_activity":
+            return await handle_get_channel_activity(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except SlackApiError as e:
@@ -771,6 +918,235 @@ async def handle_list_files(arguments: dict) -> list[TextContent]:
     response = {
         "count": len(files),
         "files": files,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+# ==================== DM/Conversation Handlers ====================
+
+def _parse_date_filter(days_ago: Optional[int] = None, since_date: Optional[str] = None) -> Optional[str]:
+    """Convert date filters to Slack timestamp."""
+    if days_ago:
+        cutoff = datetime.now() - timedelta(days=days_ago)
+        return str(cutoff.timestamp())
+    elif since_date:
+        try:
+            cutoff = datetime.strptime(since_date, "%Y-%m-%d")
+            return str(cutoff.timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
+    """Read DM conversation with a specific user."""
+    user = arguments["user"]
+    limit = min(arguments.get("limit", 50), 200)
+    days_ago = arguments.get("days_ago")
+    since_date = arguments.get("since_date")
+
+    user_id = _get_user_id(user)
+    if not user_id:
+        return [TextContent(type="text", text=f"User not found: {user}")]
+
+    # Open/get DM channel with user
+    try:
+        dm_result = slack_client.conversations_open(users=[user_id])
+        dm_channel = dm_result["channel"]["id"]
+    except SlackApiError as e:
+        return [TextContent(type="text", text=f"Could not open DM with {user}: {e.response['error']}")]
+
+    # Build history query
+    kwargs = {"channel": dm_channel, "limit": limit}
+    oldest = _parse_date_filter(days_ago, since_date)
+    if oldest:
+        kwargs["oldest"] = oldest
+
+    result = slack_client.conversations_history(**kwargs)
+
+    messages = []
+    for msg in result["messages"]:
+        sender_name = _get_user_name(msg.get("user", "unknown"))
+        messages.append({
+            "timestamp": msg["ts"],
+            "time": _format_timestamp(msg["ts"]),
+            "user": sender_name,
+            "text": msg.get("text", ""),
+            "has_thread": msg.get("reply_count", 0) > 0,
+        })
+
+    # Get user's real name for response
+    user_name = _get_user_name(user_id)
+
+    response = {
+        "dm_with": user_name,
+        "count": len(messages),
+        "date_filter": f"Last {days_ago} days" if days_ago else (f"Since {since_date}" if since_date else "All time"),
+        "messages": messages,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_get_user_messages_in_channel(arguments: dict) -> list[TextContent]:
+    """Get messages from a specific user in a channel."""
+    channel = arguments["channel"]
+    user = arguments["user"]
+    limit = min(arguments.get("limit", 100), 500)
+    days_ago = arguments.get("days_ago")
+
+    channel_id = _get_channel_id(channel)
+    if not channel_id:
+        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+
+    user_id = _get_user_id(user)
+    if not user_id:
+        return [TextContent(type="text", text=f"User not found: {user}")]
+
+    # Build history query
+    kwargs = {"channel": channel_id, "limit": limit}
+    oldest = _parse_date_filter(days_ago)
+    if oldest:
+        kwargs["oldest"] = oldest
+
+    result = slack_client.conversations_history(**kwargs)
+
+    # Filter messages by user
+    user_messages = []
+    for msg in result["messages"]:
+        if msg.get("user") == user_id:
+            user_messages.append({
+                "timestamp": msg["ts"],
+                "time": _format_timestamp(msg["ts"]),
+                "text": msg.get("text", ""),
+                "has_thread": msg.get("reply_count", 0) > 0,
+                "reactions": [
+                    {"emoji": r["name"], "count": r["count"]}
+                    for r in msg.get("reactions", [])
+                ],
+            })
+
+    user_name = _get_user_name(user_id)
+
+    response = {
+        "channel": channel,
+        "user": user_name,
+        "count": len(user_messages),
+        "scanned": len(result["messages"]),
+        "date_filter": f"Last {days_ago} days" if days_ago else "All available",
+        "messages": user_messages,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_list_dms(arguments: dict) -> list[TextContent]:
+    """List all DM conversations."""
+    limit = arguments.get("limit", 50)
+
+    result = slack_client.conversations_list(types="im", limit=limit)
+
+    dms = []
+    for dm in result["channels"]:
+        user_id = dm.get("user")
+        if user_id:
+            user_name = _get_user_name(user_id)
+            dms.append({
+                "channel_id": dm["id"],
+                "user_id": user_id,
+                "user_name": user_name,
+                "is_open": dm.get("is_open", False),
+            })
+
+    response = {
+        "count": len(dms),
+        "dms": dms,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_search_in_dms(arguments: dict) -> list[TextContent]:
+    """Search for content across DMs."""
+    query = arguments["query"]
+    limit = arguments.get("limit", 30)
+
+    # Use Slack search with "is:dm" modifier to search only DMs
+    search_query = f"{query} is:dm"
+    result = slack_client.search_messages(query=search_query, count=limit)
+
+    messages = []
+    for match in result["messages"]["matches"]:
+        messages.append({
+            "channel": match.get("channel", {}).get("name", "DM"),
+            "from_user": match.get("username", ""),
+            "timestamp": match["ts"],
+            "time": _format_timestamp(match["ts"]),
+            "text": match.get("text", ""),
+            "permalink": match.get("permalink", ""),
+        })
+
+    response = {
+        "query": query,
+        "total_matches": result["messages"]["total"],
+        "count": len(messages),
+        "messages": messages,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_get_channel_activity(arguments: dict) -> list[TextContent]:
+    """Get activity summary for a channel."""
+    channel = arguments["channel"]
+    days_ago = arguments.get("days_ago", 7)
+
+    channel_id = _get_channel_id(channel)
+    if not channel_id:
+        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+
+    oldest = _parse_date_filter(days_ago)
+    kwargs = {"channel": channel_id, "limit": 200}
+    if oldest:
+        kwargs["oldest"] = oldest
+
+    result = slack_client.conversations_history(**kwargs)
+
+    # Analyze activity
+    messages = result["messages"]
+    user_counts: dict = {}
+    thread_count = 0
+    reaction_count = 0
+
+    for msg in messages:
+        user_id = msg.get("user", "unknown")
+        user_name = _get_user_name(user_id)
+        user_counts[user_name] = user_counts.get(user_name, 0) + 1
+
+        if msg.get("reply_count", 0) > 0:
+            thread_count += 1
+        reaction_count += len(msg.get("reactions", []))
+
+    # Sort users by message count
+    top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    response = {
+        "channel": channel,
+        "period": f"Last {days_ago} days",
+        "total_messages": len(messages),
+        "threads": thread_count,
+        "reactions": reaction_count,
+        "active_users": len(user_counts),
+        "top_contributors": [{"user": u, "messages": c} for u, c in top_users],
+        "recent_messages": [
+            {
+                "user": _get_user_name(m.get("user", "unknown")),
+                "text": m.get("text", "")[:100] + "..." if len(m.get("text", "")) > 100 else m.get("text", ""),
+                "time": _format_timestamp(m["ts"]),
+            }
+            for m in messages[:5]
+        ],
     }
 
     return [TextContent(type="text", text=json.dumps(response, indent=2))]
