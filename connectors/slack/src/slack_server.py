@@ -59,30 +59,98 @@ def _get_channel_id(channel_name: str) -> Optional[str]:
 
 
 def _get_user_id(user_identifier: str) -> Optional[str]:
-    """Get user ID from name/email, with caching."""
+    """Get user ID from name/email, with caching and fuzzy matching.
+
+    Supports:
+    - Exact username match
+    - Exact email match
+    - Exact real name match (case-insensitive)
+    - Partial name match (first name, last name, or partial)
+    - Display name match
+    """
     if user_identifier.startswith("U"):
         return user_identifier  # Already an ID
 
     # Remove @ prefix if present
-    user_identifier = user_identifier.lstrip("@")
+    user_identifier = user_identifier.lstrip("@").strip()
+    search_lower = user_identifier.lower()
 
-    # Check cache
+    # Check cache for exact match first
     if user_identifier in _user_cache:
         return _user_cache[user_identifier]
+    if search_lower in _user_cache:
+        return _user_cache[search_lower]
 
     try:
         result = slack_client.users_list()
-        for user in result["members"]:
-            _user_cache[user["name"]] = user["id"]
-            if user.get("profile", {}).get("email"):
-                _user_cache[user["profile"]["email"]] = user["id"]
-            if user.get("real_name"):
-                _user_cache[user["real_name"].lower()] = user["id"]
 
-            if user["name"] == user_identifier or \
-               user.get("profile", {}).get("email") == user_identifier or \
-               user.get("real_name", "").lower() == user_identifier.lower():
-                return user["id"]
+        # First pass: look for exact matches and build cache
+        exact_match = None
+        partial_matches = []
+
+        for user in result["members"]:
+            # Skip deleted users and bots
+            if user.get("deleted") or user.get("is_bot"):
+                continue
+
+            user_id = user["id"]
+            username = user.get("name", "")
+            real_name = user.get("real_name", "")
+            profile = user.get("profile", {})
+            email = profile.get("email", "")
+            display_name = profile.get("display_name", "")
+
+            # Cache all variations
+            if username:
+                _user_cache[username] = user_id
+                _user_cache[username.lower()] = user_id
+            if email:
+                _user_cache[email] = user_id
+                _user_cache[email.lower()] = user_id
+            if real_name:
+                _user_cache[real_name.lower()] = user_id
+            if display_name:
+                _user_cache[display_name.lower()] = user_id
+
+            # Check for exact matches
+            if username == user_identifier or \
+               username.lower() == search_lower or \
+               email == user_identifier or \
+               email.lower() == search_lower or \
+               real_name.lower() == search_lower or \
+               display_name.lower() == search_lower:
+                exact_match = user_id
+                continue
+
+            # Check for partial matches (first name, last name, or contains)
+            real_name_lower = real_name.lower()
+            display_name_lower = display_name.lower()
+
+            # Check if search term matches first or last name
+            name_parts = real_name_lower.split()
+            if search_lower in name_parts:
+                # First or last name exact match - high confidence
+                partial_matches.insert(0, (user_id, real_name, "name_part"))
+            elif search_lower in real_name_lower:
+                # Partial match in real name
+                partial_matches.append((user_id, real_name, "partial"))
+            elif search_lower in display_name_lower:
+                # Partial match in display name
+                partial_matches.append((user_id, display_name, "display"))
+            elif search_lower in username.lower():
+                # Partial match in username
+                partial_matches.append((user_id, username, "username"))
+
+        # Return exact match if found
+        if exact_match:
+            return exact_match
+
+        # Return best partial match if any
+        if partial_matches:
+            best_match = partial_matches[0]
+            logger.info(f"Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+            return best_match[0]
+
     except SlackApiError as e:
         logger.error(f"Error looking up user: {e}")
 
