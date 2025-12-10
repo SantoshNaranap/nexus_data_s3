@@ -67,6 +67,9 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
     - Exact real name match (case-insensitive)
     - Partial name match (first name, last name, or partial)
     - Display name match
+
+    Returns user_id or None. For ambiguous matches, returns special
+    "AMBIGUOUS:name1|name2|name3" string that handlers can detect.
     """
     if user_identifier.startswith("U"):
         return user_identifier  # Already an ID
@@ -130,31 +133,61 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             name_parts = real_name_lower.split()
             if search_lower in name_parts:
                 # First or last name exact match - high confidence
-                partial_matches.insert(0, (user_id, real_name, "name_part"))
+                partial_matches.insert(0, (user_id, real_name, email, "name_part"))
             elif search_lower in real_name_lower:
                 # Partial match in real name
-                partial_matches.append((user_id, real_name, "partial"))
+                partial_matches.append((user_id, real_name, email, "partial"))
             elif search_lower in display_name_lower:
                 # Partial match in display name
-                partial_matches.append((user_id, display_name, "display"))
+                partial_matches.append((user_id, display_name, email, "display"))
             elif search_lower in username.lower():
                 # Partial match in username
-                partial_matches.append((user_id, username, "username"))
+                partial_matches.append((user_id, username, email, "username"))
 
         # Return exact match if found
         if exact_match:
             return exact_match
 
-        # Return best partial match if any
+        # Handle partial matches
         if partial_matches:
-            best_match = partial_matches[0]
-            logger.info(f"Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
-            return best_match[0]
+            # If only one match, return it
+            if len(partial_matches) == 1:
+                best_match = partial_matches[0]
+                logger.info(f"Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+                return best_match[0]
+
+            # Multiple matches - return special ambiguous marker
+            # Format: AMBIGUOUS:name1 (email1)|name2 (email2)|...
+            candidates = []
+            for match in partial_matches[:5]:  # Limit to 5 candidates
+                user_id, name, email, match_type = match
+                if email:
+                    candidates.append(f"{name} ({email})")
+                else:
+                    candidates.append(name)
+
+            logger.info(f"Ambiguous match for '{user_identifier}': {candidates}")
+            return f"AMBIGUOUS:{' | '.join(candidates)}"
 
     except SlackApiError as e:
         logger.error(f"Error looking up user: {e}")
 
     return None
+
+
+def _check_ambiguous_user(user_id_result: Optional[str], user_query: str) -> tuple[bool, Optional[str], Optional[str]]:
+    """Check if user lookup result is ambiguous.
+
+    Returns: (is_ambiguous, user_id_or_none, error_message_or_none)
+    """
+    if user_id_result is None:
+        return False, None, f"User not found: {user_query}. Try using their full name or email."
+
+    if user_id_result.startswith("AMBIGUOUS:"):
+        candidates = user_id_result.replace("AMBIGUOUS:", "")
+        return True, None, f"Multiple users match '{user_query}'. Did you mean: {candidates}? Please be more specific (use full name or email)."
+
+    return False, user_id_result, None
 
 
 def _format_timestamp(ts: str) -> str:
@@ -784,9 +817,10 @@ async def handle_send_dm(arguments: dict) -> list[TextContent]:
     user = arguments["user"]
     text = arguments["text"]
 
-    user_id = _get_user_id(user)
-    if not user_id:
-        return [TextContent(type="text", text=f"User not found: {user}")]
+    user_id_result = _get_user_id(user)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
+    if error_msg:
+        return [TextContent(type="text", text=error_msg)]
 
     # Open DM conversation
     dm_result = slack_client.conversations_open(users=[user_id])
@@ -841,10 +875,11 @@ async def handle_list_users(arguments: dict) -> list[TextContent]:
 async def handle_get_user_info(arguments: dict) -> list[TextContent]:
     """Get user details."""
     user = arguments["user"]
-    user_id = _get_user_id(user)
+    user_id_result = _get_user_id(user)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
 
-    if not user_id:
-        return [TextContent(type="text", text=f"User not found: {user}")]
+    if error_msg:
+        return [TextContent(type="text", text=error_msg)]
 
     result = slack_client.users_info(user=user_id)
     u = result["user"]
@@ -870,10 +905,11 @@ async def handle_get_user_info(arguments: dict) -> list[TextContent]:
 async def handle_get_user_presence(arguments: dict) -> list[TextContent]:
     """Get user presence status."""
     user = arguments["user"]
-    user_id = _get_user_id(user)
+    user_id_result = _get_user_id(user)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
 
-    if not user_id:
-        return [TextContent(type="text", text=f"User not found: {user}")]
+    if error_msg:
+        return [TextContent(type="text", text=error_msg)]
 
     result = slack_client.users_getPresence(user=user_id)
 
@@ -1014,9 +1050,10 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     days_ago = arguments.get("days_ago")
     since_date = arguments.get("since_date")
 
-    user_id = _get_user_id(user)
-    if not user_id:
-        return [TextContent(type="text", text=f"User not found: {user}")]
+    user_id_result = _get_user_id(user)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
+    if error_msg:
+        return [TextContent(type="text", text=error_msg)]
 
     # Open/get DM channel with user
     try:
@@ -1068,9 +1105,10 @@ async def handle_get_user_messages_in_channel(arguments: dict) -> list[TextConte
     if not channel_id:
         return [TextContent(type="text", text=f"Channel not found: {channel}")]
 
-    user_id = _get_user_id(user)
-    if not user_id:
-        return [TextContent(type="text", text=f"User not found: {user}")]
+    user_id_result = _get_user_id(user)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
+    if error_msg:
+        return [TextContent(type="text", text=error_msg)]
 
     # Build history query
     kwargs = {"channel": channel_id, "limit": limit}
