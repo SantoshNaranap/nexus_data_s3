@@ -110,39 +110,48 @@ async def send_message_stream(
                     step["duration"] = duration
                 return {"type": "agent_step", "step": step}
 
-            def generate_follow_up_questions(query: str, datasource: str) -> List[str]:
-                """Generate contextual follow-up questions based on datasource."""
-                follow_ups = {
-                    "mysql": [
-                        "Show me the table structure",
-                        "How many total records are there?",
-                        "What are the most recent entries?",
-                        "Can you summarize the data distribution?",
-                    ],
-                    "s3": [
-                        "What other files are in this bucket?",
-                        "Show me the file contents",
-                        "How large are these files?",
-                        "What's the folder structure?",
-                    ],
-                    "jira": [
-                        "Show me high priority issues",
-                        "What issues are assigned to me?",
-                        "Show issues updated this week",
-                        "What's the status breakdown?",
-                    ],
-                    "google_workspace": [
-                        "Show me recent documents",
-                        "What events are coming up?",
-                        "Search for specific content",
-                        "Show shared documents",
-                    ],
-                }
-                return follow_ups.get(datasource, [
-                    "Tell me more about this",
-                    "Can you provide more details?",
-                    "What else can you show me?",
-                ])[:3]
+            async def generate_follow_up_questions(query: str, response: str, datasource: str) -> List[str]:
+                """Generate contextual follow-up questions using Claude Haiku."""
+                from anthropic import Anthropic
+                from app.core.config import settings
+
+                try:
+                    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+                    # Use Haiku for fast, cheap follow-up generation
+                    result = client.messages.create(
+                        model="claude-3-5-haiku-20241022",
+                        max_tokens=200,
+                        messages=[{
+                            "role": "user",
+                            "content": f"""Based on this conversation about {datasource}, suggest 3 natural follow-up questions the user might ask next.
+
+User asked: {query}
+
+Response summary: {response[:500]}...
+
+Rules:
+- Questions should be specific to what was discussed, not generic
+- Questions should help the user explore the data further
+- Keep questions concise (under 10 words each)
+- Return ONLY the 3 questions, one per line, no numbering or bullets"""
+                        }]
+                    )
+
+                    # Parse the response into a list
+                    questions = [q.strip() for q in result.content[0].text.strip().split('\n') if q.strip()]
+                    return questions[:3]
+
+                except Exception as e:
+                    # Fallback to static questions if AI fails
+                    logger.warning(f"Failed to generate follow-ups: {e}")
+                    fallback = {
+                        "mysql": ["Show related records", "What are the column types?", "Any null values?"],
+                        "s3": ["List other objects", "Show file metadata", "Download this file"],
+                        "jira": ["Show related issues", "Who else is involved?", "What's the history?"],
+                        "google_workspace": ["Show recent changes", "Who has access?", "Search similar"],
+                    }
+                    return fallback.get(datasource, ["Tell me more", "Show details", "What else?"])
 
             try:
                 # Send session ID first
@@ -209,8 +218,12 @@ async def send_message_stream(
                     f"Completed in {elapsed:.1f}s", int(elapsed * 1000)
                 ))
 
-                # Generate follow-up questions
-                follow_ups = generate_follow_up_questions(request.message, request.datasource)
+                # Generate contextual follow-up questions based on the actual conversation
+                follow_ups = await generate_follow_up_questions(
+                    request.message,
+                    accumulated_content,
+                    request.datasource
+                )
 
                 # Add datasource as a source if no tools were called
                 if not sources_used:

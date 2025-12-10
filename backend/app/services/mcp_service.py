@@ -269,6 +269,9 @@ class MCPService:
                 "google_oauth_client_id": "GOOGLE_OAUTH_CLIENT_ID",
                 "google_oauth_client_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
                 "user_google_email": "USER_GOOGLE_EMAIL",
+                # Slack
+                "slack_bot_token": "SLACK_BOT_TOKEN",
+                "slack_app_token": "SLACK_APP_TOKEN",
             }
 
             # Update env with user credentials
@@ -493,6 +496,8 @@ class MCPService:
             "list_projects", "get_project", "search_issues", "get_issue", "query_jira",  # JIRA
             "list_tables", "describe_table",  # MySQL (not execute_query - could have side effects)
             "get_events", "list_messages", "search_drive_files",  # Google Workspace
+            "list_channels", "get_channel_info", "read_messages", "search_messages",  # Slack
+            "list_users", "get_user_info", "get_user_presence", "get_thread_replies", "list_files",  # Slack
         ]
 
         cache_key = None

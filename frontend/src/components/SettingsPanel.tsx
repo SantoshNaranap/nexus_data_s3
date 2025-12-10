@@ -19,6 +19,71 @@ interface CredentialField {
   required: boolean
 }
 
+// Instructions for obtaining API credentials for each datasource
+const credentialInstructions: Record<string, { title: string; steps: string[] }> = {
+  s3: {
+    title: 'How to get AWS credentials',
+    steps: [
+      'Log in to AWS Console at aws.amazon.com',
+      'Go to IAM → Users → Your user → Security credentials',
+      'Click "Create access key" and select your use case',
+      'Copy the Access Key ID and Secret Access Key',
+      'For region, use your S3 bucket\'s region (e.g., us-east-1)',
+    ],
+  },
+  mysql: {
+    title: 'How to get MySQL credentials',
+    steps: [
+      'Host: Your database server address (e.g., localhost or AWS RDS endpoint)',
+      'Port: Usually 3306 for MySQL',
+      'Username/Password: Provided by your database administrator',
+      'Database: The specific database name you want to connect to',
+    ],
+  },
+  jira: {
+    title: 'How to get JIRA API Token',
+    steps: [
+      'Log in to Atlassian at id.atlassian.com',
+      'Go to Security → Create and manage API tokens',
+      'Click "Create API token" and give it a label',
+      'Copy the token (shown only once)',
+      'URL format: https://your-company.atlassian.net',
+    ],
+  },
+  shopify: {
+    title: 'How to get Shopify Access Token',
+    steps: [
+      'Log in to your Shopify admin panel',
+      'Go to Settings → Apps and sales channels → Develop apps',
+      'Create an app or select existing one',
+      'Go to API credentials and create Admin API access token',
+      'Shop URL format: your-store.myshopify.com',
+    ],
+  },
+  google_workspace: {
+    title: 'How to get Google OAuth credentials',
+    steps: [
+      'Go to Google Cloud Console (console.cloud.google.com)',
+      'Create a project or select existing one',
+      'Enable Google Drive API and Gmail API',
+      'Go to APIs & Services → Credentials → Create OAuth Client ID',
+      'Set application type to "Web application"',
+      'Add authorized redirect URI: http://localhost:8000/api/auth/google/callback',
+    ],
+  },
+  slack: {
+    title: 'How to get Slack Bot Token',
+    steps: [
+      'Go to api.slack.com/apps and click "Create New App"',
+      'Choose "From scratch" and select your workspace',
+      'Go to OAuth & Permissions in the sidebar',
+      'Add required scopes (channels:read, chat:write, users:read, etc.)',
+      'Click "Install to Workspace" and authorize',
+      'Copy the "Bot User OAuth Token" (starts with xoxb-)',
+    ],
+  },
+}
+
 const credentialFields: Record<string, CredentialField[]> = {
   s3: [
     {
@@ -146,6 +211,22 @@ const credentialFields: Record<string, CredentialField[]> = {
       label: 'Google Email (Optional)',
       type: 'text',
       placeholder: 'you@gmail.com',
+      required: false,
+    },
+  ],
+  slack: [
+    {
+      name: 'slack_bot_token',
+      label: 'Bot Token',
+      type: 'password',
+      placeholder: 'xoxb-...',
+      required: true,
+    },
+    {
+      name: 'slack_app_token',
+      label: 'App Token (Optional)',
+      type: 'password',
+      placeholder: 'xapp-...',
       required: false,
     },
   ],
@@ -448,7 +529,36 @@ export default function SettingsPanel({
                     </div>
                   )}
 
-                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-6">
+                  {/* Credential Instructions */}
+                  {credentialInstructions[selectedDatasource.id] && (
+                    <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mt-6">
+                      <div className="flex items-start space-x-3">
+                        <svg
+                          className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+                          />
+                        </svg>
+                        <div className="text-sm text-amber-900 dark:text-amber-200">
+                          <p className="font-medium mb-2">{credentialInstructions[selectedDatasource.id].title}</p>
+                          <ol className="list-decimal list-inside space-y-1">
+                            {credentialInstructions[selectedDatasource.id].steps.map((step, index) => (
+                              <li key={index} className="text-amber-800 dark:text-amber-300">{step}</li>
+                            ))}
+                          </ol>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
                     <div className="flex items-start space-x-3">
                       <svg
                         className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"
