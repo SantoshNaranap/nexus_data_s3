@@ -337,13 +337,26 @@ async def start_auth_flow(
     # Note: Caller should ensure OAuth callback is available before calling this function
 
     try:
-        if "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ and (
-            "localhost" in redirect_uri or "127.0.0.1" in redirect_uri
-        ):  # Use passed redirect_uri
+        # Only allow insecure transport in development mode for localhost
+        environment = os.getenv("ENVIRONMENT", "development").lower()
+        is_localhost = "localhost" in redirect_uri or "127.0.0.1" in redirect_uri
+
+        if environment == "production" and is_localhost:
             logger.warning(
-                "OAUTHLIB_INSECURE_TRANSPORT not set. Setting it for localhost/local development."
+                "Production environment detected with localhost redirect_uri. "
+                "This configuration is not recommended for production use."
             )
-            os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+        elif is_localhost and "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ:
+            if environment != "production":
+                logger.info(
+                    "Development mode: Enabling OAUTHLIB_INSECURE_TRANSPORT for localhost OAuth."
+                )
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+            else:
+                logger.error(
+                    "Production mode: OAUTHLIB_INSECURE_TRANSPORT is disabled. "
+                    "Use HTTPS redirect URIs in production."
+                )
 
         oauth_state = os.urandom(16).hex()
 
@@ -448,12 +461,21 @@ def handle_auth_callback(
                 "The 'client_secrets_path' parameter is deprecated. Use GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET environment variables instead."
             )
 
-        # Allow HTTP for localhost in development
-        if "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ:
-            logger.warning(
-                "OAUTHLIB_INSECURE_TRANSPORT not set. Setting it for localhost development."
-            )
-            os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+        # Only allow insecure transport in development mode for localhost
+        environment = os.getenv("ENVIRONMENT", "development").lower()
+        is_localhost = "localhost" in redirect_uri or "127.0.0.1" in redirect_uri
+
+        if is_localhost and "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ:
+            if environment != "production":
+                logger.info(
+                    "Development mode: Enabling OAUTHLIB_INSECURE_TRANSPORT for localhost OAuth callback."
+                )
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+            else:
+                logger.error(
+                    "Production mode: OAUTHLIB_INSECURE_TRANSPORT is disabled. "
+                    "Use HTTPS redirect URIs in production."
+                )
 
         store = get_oauth21_session_store()
         parsed_response = urlparse(authorization_response)

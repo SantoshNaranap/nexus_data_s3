@@ -1,0 +1,88 @@
+"""Database models for multi-tenant support."""
+
+from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Index
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql import func
+from datetime import datetime
+import uuid
+
+Base = declarative_base()
+
+
+class User(Base):
+    """User model for authentication (Google OAuth)."""
+
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=True)
+    google_id = Column(String(255), unique=True, nullable=False, index=True)
+    profile_picture = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+    def to_dict(self):
+        """Convert user to dictionary."""
+        return {
+            "id": self.id,
+            "email": self.email,
+            "name": self.name,
+            "google_id": self.google_id,
+            "profile_picture": self.profile_picture,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ChatHistory(Base):
+    """Chat history model for storing conversation messages per user."""
+
+    __tablename__ = "chat_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String(255), nullable=False, index=True)
+    datasource = Column(String(50), nullable=False, index=True)
+    role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index('idx_user_datasource_created', 'user_id', 'datasource', 'created_at'),
+        Index('idx_user_session', 'user_id', 'session_id'),
+    )
+
+    def __repr__(self):
+        return f"<ChatHistory(id={self.id}, user_id={self.user_id}, role={self.role})>"
+
+    def to_dict(self):
+        """Convert to dictionary format compatible with chat service."""
+        return {
+            "role": self.role,
+            "content": self.content,
+        }
+
+
+class UserCredential(Base):
+    """User credentials model for storing encrypted datasource credentials."""
+
+    __tablename__ = "user_credentials"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    datasource = Column(String(50), nullable=False, index=True)
+    encrypted_credentials = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+    def to_dict(self):
+        """Convert user credential to dictionary."""
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "datasource": self.datasource,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

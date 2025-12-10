@@ -1,13 +1,15 @@
 import axios from 'axios';
-import type { DataSource, ChatRequest, ChatResponse } from '../types';
+import type { DataSource, ChatRequest, ChatResponse, AgentStep, User, SourceReference } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Centralized API base URL - single source of truth
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: true,
 });
 
 export const datasourceApi = {
@@ -16,9 +18,28 @@ export const datasourceApi = {
     return response.data;
   },
 
-  test: async (datasourceId: string) => {
-    const response = await api.get(`/api/datasources/${datasourceId}/test`);
+  test: async (datasourceId: string): Promise<{ connected: boolean; error?: string }> => {
+    const response = await api.post(`/api/datasources/${datasourceId}/test`);
     return response.data;
+  },
+};
+
+export const credentialsApi = {
+  checkStatus: async (datasource: string): Promise<{ configured: boolean }> => {
+    const response = await api.get(`/api/credentials/${datasource}/status`);
+    return response.data;
+  },
+
+  save: async (datasource: string, credentials: Record<string, string>) => {
+    const response = await api.post('/api/credentials', {
+      datasource,
+      credentials,
+    });
+    return response.data;
+  },
+
+  delete: async (datasource: string) => {
+    await api.delete(`/api/credentials/${datasource}`);
   },
 };
 
@@ -32,14 +53,17 @@ export const chatApi = {
     request: ChatRequest,
     onChunk: (chunk: string) => void,
     onSession: (sessionId: string) => void,
-    onDone: () => void,
-    onError: (error: string) => void
+    onDone: (metadata?: { sources?: SourceReference[]; followUpQuestions?: string[] }) => void,
+    onError: (error: string) => void,
+    onAgentStep?: (step: AgentStep) => void,
+    onSource?: (source: SourceReference) => void
   ): Promise<void> => {
     const response = await fetch(`${API_BASE_URL}/api/chat/message/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
+      credentials: 'include',
       body: JSON.stringify(request),
     });
 
@@ -65,21 +89,39 @@ export const chatApi = {
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            const data = JSON.parse(line.slice(6));
+            try {
+              const data = JSON.parse(line.slice(6));
 
-            switch (data.type) {
-              case 'session':
-                onSession(data.session_id);
-                break;
-              case 'content':
-                onChunk(data.content);
-                break;
-              case 'done':
-                onDone();
-                break;
-              case 'error':
-                onError(data.error);
-                break;
+              switch (data.type) {
+                case 'session':
+                  onSession(data.session_id);
+                  break;
+                case 'content':
+                  onChunk(data.content);
+                  break;
+                case 'agent_step':
+                  if (onAgentStep) {
+                    onAgentStep(data.step);
+                  }
+                  break;
+                case 'source':
+                  if (onSource) {
+                    onSource(data.source);
+                  }
+                  break;
+                case 'done':
+                  onDone({
+                    sources: data.sources,
+                    followUpQuestions: data.follow_up_questions,
+                  });
+                  break;
+                case 'error':
+                  onError(data.error);
+                  break;
+              }
+            } catch (parseError) {
+              // Ignore parse errors for partial JSON
+              console.debug('Skipping malformed SSE line:', line);
             }
           }
         }
@@ -101,6 +143,26 @@ export const chatApi = {
 
   deleteSession: async (sessionId: string) => {
     await api.delete(`/api/chat/sessions/${sessionId}`);
+  },
+};
+
+export const authApi = {
+  getCurrentUser: async (): Promise<User | null> => {
+    try {
+      const response = await api.get<User>('/api/auth/me');
+      return response.data;
+    } catch (error) {
+      // 401 means not authenticated, return null
+      return null;
+    }
+  },
+
+  logout: async (): Promise<void> => {
+    await api.post('/api/auth/logout');
+  },
+
+  getGoogleAuthUrl: (): string => {
+    return `${API_BASE_URL}/api/auth/google`;
   },
 };
 

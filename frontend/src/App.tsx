@@ -1,22 +1,86 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { datasourceApi } from './services/api'
+import { datasourceApi, credentialsApi } from './services/api'
 import DataSourceSidebar from './components/DataSourceSidebar'
 import ChatInterface from './components/ChatInterface'
+import SettingsPanel from './components/SettingsPanel'
+import UserMenu from './components/UserMenu'
+import ProtectedRoute from './components/ProtectedRoute'
+import LoginPage from './pages/LoginPage'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
 import type { DataSource } from './types'
 
 function AppContent() {
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(null)
+  const [configuredDatasources, setConfiguredDatasources] = useState<Set<string>>(new Set())
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
   const { theme, toggleTheme } = useTheme()
+  const { user, isAuthenticated } = useAuth()
 
   const { data: datasources, isLoading } = useQuery({
     queryKey: ['datasources'],
     queryFn: datasourceApi.list,
   })
 
+  // Check which datasources already have credentials saved
+  useEffect(() => {
+    async function checkExistingCredentials() {
+      if (!datasources || !isAuthenticated) return
+
+      const configured = new Set<string>()
+
+      // Check each datasource for existing credentials
+      await Promise.all(
+        datasources.map(async (ds) => {
+          try {
+            const status = await credentialsApi.checkStatus(ds.id)
+            if (status.configured) {
+              configured.add(ds.id)
+              console.log(`[App] ${ds.id} already configured`)
+            }
+          } catch (error) {
+            console.error(`[App] Failed to check ${ds.id} credentials:`, error)
+          }
+        })
+      )
+
+      setConfiguredDatasources(configured)
+      console.log('[App] Configured datasources:', Array.from(configured))
+    }
+
+    checkExistingCredentials()
+  }, [datasources, isAuthenticated])
+
   const handleSelectDatasource = (datasource: DataSource) => {
     setSelectedDatasource(datasource)
+  }
+
+  const handleSaveCredentials = async (
+    datasource: string,
+    credentials: Record<string, string>,
+    testResult?: { success: boolean }
+  ) => {
+    try {
+      // Send credentials to backend using the API service
+      await credentialsApi.save(datasource, credentials)
+
+      // Only mark as configured if test result is successful
+      if (testResult?.success) {
+        setConfiguredDatasources((prev) => new Set(prev).add(datasource))
+      } else if (testResult?.success === false) {
+        // Remove from configured if test failed
+        setConfiguredDatasources((prev) => {
+          const updated = new Set(prev)
+          updated.delete(datasource)
+          return updated
+        })
+      }
+    } catch (error) {
+      console.error('Error saving credentials:', error)
+      throw error
+    }
   }
 
   return (
@@ -25,7 +89,18 @@ function AppContent() {
         datasources={datasources || []}
         selectedDatasource={selectedDatasource}
         onSelectDatasource={handleSelectDatasource}
+        onOpenSettings={() => setSettingsPanelOpen(true)}
+        configuredDatasources={configuredDatasources}
         isLoading={isLoading}
+      />
+
+      {/* Settings Panel */}
+      <SettingsPanel
+        datasources={datasources || []}
+        isOpen={settingsPanelOpen}
+        onClose={() => setSettingsPanelOpen(false)}
+        onSave={handleSaveCredentials}
+        configuredDatasources={configuredDatasources}
       />
 
       <div className="flex-1 flex flex-col">
@@ -50,22 +125,27 @@ function AppContent() {
               </div>
             </div>
 
-            {/* Theme Toggle - Google style */}
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-all duration-200"
-              aria-label="Toggle theme"
-            >
-              {theme === 'light' ? (
-                <svg className="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                </svg>
-              ) : (
-                <svg className="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                </svg>
-              )}
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Theme Toggle - Google style */}
+              <button
+                onClick={toggleTheme}
+                className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-all duration-200"
+                aria-label="Toggle theme"
+              >
+                {theme === 'light' ? (
+                  <svg className="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                  </svg>
+                )}
+              </button>
+
+              {/* User Menu */}
+              <UserMenu />
+            </div>
           </div>
         </header>
 
@@ -140,11 +220,27 @@ function AppContent() {
   )
 }
 
+function MainApp() {
+  return (
+    <ProtectedRoute>
+      <AppContent />
+    </ProtectedRoute>
+  )
+}
+
 function App() {
   return (
-    <ThemeProvider>
-      <AppContent />
-    </ThemeProvider>
+    <BrowserRouter>
+      <ThemeProvider>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/" element={<MainApp />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </ThemeProvider>
+    </BrowserRouter>
   )
 }
 

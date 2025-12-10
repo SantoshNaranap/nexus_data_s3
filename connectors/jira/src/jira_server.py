@@ -15,15 +15,26 @@ from jira.exceptions import JIRAError
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
+from query_parser import JiraQueryParser
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-mcp-server")
 
+# Get JIRA URL and ensure it has a scheme
+jira_url = os.getenv("JIRA_URL", "")
+if jira_url and not jira_url.startswith(("http://", "https://")):
+    jira_url = f"https://{jira_url}"
+    logger.info(f"Added https:// scheme to JIRA URL: {jira_url}")
+
 # Initialize JIRA client
 jira_client = JIRA(
-    server=os.getenv("JIRA_URL"),
+    server=jira_url,
     basic_auth=(os.getenv("JIRA_EMAIL"), os.getenv("JIRA_API_TOKEN")),
 )
+
+# Initialize query parser
+query_parser = JiraQueryParser(jira_client)
 
 # Create MCP server
 app = Server("jira-connector")
@@ -33,6 +44,35 @@ app = Server("jira-connector")
 async def list_tools() -> list[Tool]:
     """List all available JIRA tools."""
     return [
+        Tool(
+            name="query_jira",
+            description="""RECOMMENDED: Query JIRA using natural language.
+
+This tool automatically:
+- Matches person names (e.g., "austin" → "Austin Prabu")
+- Matches project names (e.g., "oralia-v2" → project key "ORALIA")
+- Handles status filters ("open issues", "closed", "in progress")
+- Detects counts ("how many issues")
+- Generates and executes the correct JQL query
+
+Examples:
+- "What is austin working on in Oralia-v2?"
+- "How many open bugs are there?"
+- "Show me santosh's tasks"
+- "What's in the backlog?"
+
+Just pass the user's question as-is to this tool!""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language query about JIRA issues",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
         Tool(
             name="search_issues",
             description="""Search for JIRA issues using JQL (JIRA Query Language).
@@ -178,7 +218,9 @@ Always start with 'project = PROJECTKEY' if you know the project.""",
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
     try:
-        if name == "search_issues":
+        if name == "query_jira":
+            return await handle_query_jira(arguments)
+        elif name == "search_issues":
             return await handle_search_issues(arguments)
         elif name == "get_issue":
             return await handle_get_issue(arguments)
@@ -202,8 +244,67 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Unexpected error: {str(e)}")]
 
 
+async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle natural language JIRA queries."""
+    if "query" not in arguments or not arguments["query"]:
+        return [TextContent(
+            type="text",
+            text='ERROR: Missing required parameter "query". Provide a natural language query about JIRA issues.'
+        )]
+
+    query = arguments["query"]
+    logger.info(f"Processing natural language query: {query}")
+
+    # Parse the query
+    parsed = query_parser.parse(query)
+    logger.info(f"Parsed query: {json.dumps(parsed, indent=2)}")
+
+    jql = parsed["jql"]
+    is_count = parsed["is_count"]
+    matched_entities = parsed["matched_entities"]
+
+    # Execute the JQL query
+    max_results = 50 if not is_count else 100
+    issues = jira_client.search_issues(jql, maxResults=max_results, fields="key,summary,status,assignee")
+
+    # Format results
+    results = []
+    for issue in issues:
+        issue_data = {
+            "key": issue.key,
+            "summary": issue.fields.summary,
+            "status": issue.fields.status.name,
+        }
+        if hasattr(issue.fields, "assignee") and issue.fields.assignee:
+            issue_data["assignee"] = issue.fields.assignee.displayName
+        results.append(issue_data)
+
+    # Build response
+    response = {
+        "query": query,
+        "jql": jql,
+        "matched_entities": matched_entities,
+        "total": len(results),
+        "issues": results,
+    }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
 async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
     """Search for issues using JQL."""
+    # Validate required parameters with clear error messages
+    if "jql" not in arguments or not arguments["jql"]:
+        return [TextContent(
+            type="text",
+            text='ERROR: Missing required parameter "jql". You MUST provide a JQL query string.\n\n' +
+                 'Examples of valid calls:\n' +
+                 '- {"jql": "project = ORALIA AND status != Closed"}\n' +
+                 '- {"jql": "assignee ~ \\"austin\\""}\n' +
+                 '- {"jql": "status = Open"}\n\n' +
+                 'NEVER call search_issues with empty parameters {}!'
+        )]
+
     jql = arguments["jql"]
     max_results = arguments.get("max_results", 50)
     fields = arguments.get("fields", "key,summary,status,assignee")
@@ -326,6 +427,19 @@ async def handle_list_projects() -> list[TextContent]:
 
 async def handle_get_project(arguments: dict[str, Any]) -> list[TextContent]:
     """Get project details."""
+    # Validate required parameters with clear error messages
+    if "project_key" not in arguments or not arguments["project_key"]:
+        return [TextContent(
+            type="text",
+            text='ERROR: Missing required parameter "project_key". You MUST provide a project key.\n\n' +
+                 'IMPORTANT: You need to call list_projects FIRST to get the available project keys!\n\n' +
+                 'Example workflow:\n' +
+                 '1. Call list_projects with {} to see all projects\n' +
+                 '2. Find the project key (e.g., "ORALIA" for "oralia-v2")\n' +
+                 '3. Call get_project with {"project_key": "ORALIA"}\n\n' +
+                 'NEVER call get_project with empty parameters {}!'
+        )]
+
     project_key = arguments["project_key"]
     project = jira_client.project(project_key)
 

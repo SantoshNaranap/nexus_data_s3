@@ -1,11 +1,54 @@
 """Application configuration."""
 
+import os
+import logging
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import List
+from cryptography.fernet import Fernet
+
+logger = logging.getLogger(__name__)
+
+
+def _get_or_generate_encryption_key() -> str:
+    """
+    Get encryption key from environment or generate and persist one.
+
+    In development: Auto-generates and saves to .env file.
+    In production: Should be set via environment variable.
+    """
+    env_key = os.getenv("ENCRYPTION_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    # Check if we're in production mode
+    environment = os.getenv("ENVIRONMENT", "development").lower()
+    if environment == "production":
+        raise ValueError(
+            "ENCRYPTION_KEY is required in production. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+
+    # Development mode: generate and persist key
+    new_key = Fernet.generate_key().decode()
+
+    # Try to append to .env file
+    env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+    try:
+        with open(env_file, "a") as f:
+            f.write(f"\n# Auto-generated encryption key (DO NOT share in production)\nENCRYPTION_KEY={new_key}\n")
+        logger.warning(f"Generated new ENCRYPTION_KEY and saved to {env_file}")
+    except Exception as e:
+        logger.warning(f"Could not save ENCRYPTION_KEY to .env: {e}. Key will be regenerated on restart!")
+
+    return new_key
 
 
 class Settings(BaseSettings):
     """Application settings."""
+
+    # Environment
+    environment: str = "development"  # development, staging, production
 
     # API Configuration
     backend_host: str = "0.0.0.0"
@@ -17,6 +60,11 @@ class Settings(BaseSettings):
         """Parse CORS origins from comma-separated string."""
         return [origin.strip() for origin in self.cors_origins.split(",")]
 
+    @property
+    def is_production(self) -> bool:
+        """Check if running in production mode."""
+        return self.environment.lower() == "production"
+
     # Anthropic Claude
     anthropic_api_key: str
 
@@ -25,12 +73,19 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     aws_default_region: str = "us-east-1"
 
-    # MySQL
+    # MySQL (Connector - for user data queries)
     mysql_host: str = "localhost"
     mysql_port: int = 3306
     mysql_user: str = ""
     mysql_password: str = ""
     mysql_database: str = ""
+
+    # Local MySQL (App database - for chat history, users, credentials)
+    local_mysql_host: str = "localhost"
+    local_mysql_port: int = 3306
+    local_mysql_user: str = "root"
+    local_mysql_password: str = ""
+    local_mysql_database: str = "connectorMCP"
 
     # JIRA
     jira_url: str = ""
@@ -47,8 +102,31 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str = ""
     user_google_email: str = ""  # Optional: for single-user mode
 
+    # Slack
+    slack_bot_token: str = ""
+    slack_app_token: str = ""  # Optional: for Socket Mode
+
+    # GitHub
+    github_token: str = ""  # Personal Access Token or GitHub App token
+
+    # JWT Configuration
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 1440
+
     # Logging
     log_level: str = "INFO"
+
+    # Encryption - will be auto-generated in development if not set
+    encryption_key: str = ""
+
+    @field_validator("encryption_key", mode="before")
+    @classmethod
+    def validate_encryption_key(cls, v: str) -> str:
+        """Ensure encryption key is set, generate if in development."""
+        if v and v.strip():
+            return v.strip()
+        return _get_or_generate_encryption_key()
 
     class Config:
         env_file = ".env"

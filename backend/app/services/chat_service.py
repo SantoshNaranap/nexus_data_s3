@@ -1,16 +1,32 @@
 """Chat service for handling LLM interactions."""
 
 import logging
-from typing import List, Dict, Any, AsyncGenerator
+import asyncio
+import time
+from typing import List, Dict, Any, AsyncGenerator, Optional, Tuple
 import json
 import random
+from concurrent.futures import ThreadPoolExecutor
 from anthropic import Anthropic
 from anthropic.types import ToolUseBlock, TextBlock, MessageStreamEvent
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.mcp_service import mcp_service
+from app.models.database import ChatHistory
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for running synchronous Anthropic streaming in background
+_stream_executor = ThreadPoolExecutor(max_workers=10)
+
+# Performance tracking
+PERF_METRICS = {
+    "haiku_routing_time": [],
+    "tool_execution_time": [],
+    "sonnet_generation_time": [],
+}
 
 
 def get_quirky_thinking_message(tool_name: str) -> str:
@@ -91,13 +107,122 @@ class ChatService:
 
     def __init__(self):
         self.client = Anthropic(api_key=settings.anthropic_api_key)
-        self.sessions: Dict[str, List[dict]] = {}  # In-memory session storage
+        self.sessions: Dict[str, List[dict]] = {}  # In-memory session storage for anonymous users
 
-    def _get_session_messages(self, session_id: str) -> List[dict]:
-        """Get messages for a session."""
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
-        return self.sessions[session_id]
+    async def save_chat_history(
+        self,
+        user_id: str,
+        session_id: str,
+        datasource: str,
+        messages: List[dict],
+        db: AsyncSession,
+    ) -> None:
+        """
+        Save chat history to MySQL database for authenticated users.
+
+        Args:
+            user_id: User ID
+            session_id: Session ID
+            datasource: Datasource name
+            messages: List of message dicts with 'role' and 'content'
+            db: Database session
+        """
+        try:
+            # Save each message
+            for message in messages:
+                chat_record = ChatHistory(
+                    user_id=user_id,
+                    session_id=session_id,
+                    datasource=datasource,
+                    role=message.get("role"),
+                    content=message.get("content"),
+                )
+                db.add(chat_record)
+
+            await db.commit()
+            logger.info(f"Saved {len(messages)} messages to chat history for user {user_id[:8]}...")
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Failed to save chat history: {str(e)}")
+            raise
+
+    async def get_chat_history(
+        self,
+        user_id: str,
+        datasource: str,
+        session_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> List[dict]:
+        """
+        Get chat history from MySQL database for authenticated users.
+
+        Args:
+            user_id: User ID
+            datasource: Datasource name
+            session_id: Optional session ID to filter by
+            db: Database session
+
+        Returns:
+            List of message dicts with 'role' and 'content'
+        """
+        if not db:
+            return []
+
+        try:
+            # Build query
+            query = select(ChatHistory).where(
+                ChatHistory.user_id == user_id,
+                ChatHistory.datasource == datasource,
+            )
+
+            if session_id:
+                query = query.where(ChatHistory.session_id == session_id)
+
+            # Order by creation time
+            query = query.order_by(ChatHistory.created_at.asc())
+
+            # Execute query
+            result = await db.execute(query)
+            chat_records = result.scalars().all()
+
+            # Convert to dict format
+            messages = [record.to_dict() for record in chat_records]
+
+            logger.info(f"Retrieved {len(messages)} messages from chat history for user {user_id[:8]}...")
+            return messages
+
+        except Exception as e:
+            logger.error(f"Failed to get chat history: {str(e)}")
+            return []
+
+    async def _get_session_messages(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+        datasource: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> List[dict]:
+        """
+        Get messages for a session.
+
+        For authenticated users: Load from MySQL database.
+        For anonymous users: Load from in-memory storage.
+        """
+        if user_id and db and datasource:
+            # Authenticated user - load from database
+            messages = await self.get_chat_history(
+                user_id=user_id,
+                datasource=datasource,
+                session_id=session_id,
+                db=db,
+            )
+            return messages
+        else:
+            # Anonymous user - use in-memory storage
+            if session_id not in self.sessions:
+                self.sessions[session_id] = []
+            return self.sessions[session_id]
 
     def _extract_bucket_name_from_messages(self, messages: List[dict]) -> str:
         """Extract S3 bucket name from user messages."""
@@ -385,14 +510,26 @@ class ChatService:
         return None
 
     async def process_message(
-        self, message: str, datasource: str, session_id: str
+        self,
+        message: str,
+        datasource: str,
+        session_id: str,
+        credential_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
     ) -> tuple[str, List[dict]]:
         """Process a chat message using Claude and MCP tools."""
         # Get session history
-        messages = self._get_session_messages(session_id)
+        messages = await self._get_session_messages(
+            session_id=session_id,
+            user_id=user_id,
+            datasource=datasource,
+            db=db,
+        )
 
         # Add user message to history
-        messages.append({"role": "user", "content": message})
+        user_message = {"role": "user", "content": message}
+        messages.append(user_message)
 
         # Get available tools from MCP server
         tools = await self._get_tools(datasource)
@@ -402,61 +539,256 @@ class ChatService:
 
         # Process with Claude
         response_text, tool_calls = await self._call_claude(
-            messages, tools, system_prompt, datasource
+            messages, tools, system_prompt, datasource, credential_session_id, user_id, db
         )
 
         # Add assistant message to history
-        messages.append({"role": "assistant", "content": response_text})
+        assistant_message = {"role": "assistant", "content": response_text}
+        messages.append(assistant_message)
+
+        # Save to database if authenticated user
+        if user_id and db:
+            try:
+                await self.save_chat_history(
+                    user_id=user_id,
+                    session_id=session_id,
+                    datasource=datasource,
+                    messages=[user_message, assistant_message],
+                    db=db,
+                )
+            except Exception as e:
+                logger.error(f"Failed to save chat history: {str(e)}")
+                # Don't fail the request if saving fails
 
         return response_text, tool_calls
 
     async def process_message_stream(
-        self, message: str, datasource: str, session_id: str
+        self,
+        message: str,
+        datasource: str,
+        session_id: str,
+        credential_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
     ) -> AsyncGenerator[str, None]:
-        """Process a chat message with streaming response."""
+        """Process a chat message with streaming response - OPTIMIZED FOR SPEED."""
+        start_time = time.time()
+
+        # Check if user wants fresh data (bypass cache)
+        force_refresh = mcp_service.should_force_refresh(message)
+        if force_refresh:
+            logger.info(f"🔄 User requested refresh - bypassing cache")
+
+        # CHECK ULTRA-FAST PATH FIRST (skip Claude entirely for simple queries)
+        if self._can_use_ultra_fast_path(message, datasource):
+            logger.info(f"⚡⚡⚡ Attempting ULTRA-FAST PATH (no Claude API call)")
+
+            # Get tool call directly
+            direct_tools = self._direct_tool_routing(message, datasource)
+            if direct_tools and len(direct_tools) == 1:
+                tool_call = direct_tools[0]
+                tool_name = tool_call["tool"]
+                tool_args = tool_call.get("args", {})
+
+                # Execute tool
+                try:
+                    result = await mcp_service.call_tool(
+                        datasource=datasource,
+                        tool_name=tool_name,
+                        arguments=tool_args,
+                        user_id=user_id,
+                        session_id=credential_session_id if not user_id else None,
+                        db=db,
+                        force_refresh=force_refresh,
+                    )
+
+                    # Extract result text
+                    result_text = ""
+                    if result:
+                        for content in result:
+                            if hasattr(content, "text"):
+                                result_text += content.text
+
+                    # Try to format response without Claude
+                    formatted = self._format_ultra_fast_response(datasource, tool_name, result_text)
+                    if formatted:
+                        elapsed = time.time() - start_time
+                        logger.info(f"⚡⚡⚡ ULTRA-FAST PATH success in {elapsed:.2f}s (no Claude!)")
+
+                        # Stream the formatted response in word-sized chunks for smooth effect
+                        import re
+                        # Split by words while keeping punctuation and whitespace attached
+                        words = re.findall(r'\S+\s*|\n+', formatted)
+                        for word in words:
+                            yield {"type": "text", "content": word}
+
+                        # Save to history
+                        messages = await self._get_session_messages(session_id, user_id, datasource, db)
+                        user_message = {"role": "user", "content": message}
+                        assistant_message = {"role": "assistant", "content": formatted}
+                        messages.append(user_message)
+                        messages.append(assistant_message)
+
+                        if user_id and db:
+                            try:
+                                await self.save_chat_history(user_id, session_id, datasource, [user_message, assistant_message], db)
+                            except Exception as e:
+                                logger.error(f"Failed to save chat history: {str(e)}")
+
+                        return  # Exit early - we're done!
+
+                except Exception as e:
+                    logger.warning(f"Ultra-fast path failed, falling back to regular path: {e}")
+
+        # IMMEDIATE FEEDBACK - Send within 50ms
+        immediate_feedback = self._get_immediate_feedback_message(datasource, message)
+        yield immediate_feedback + "\n\n"
+        logger.info(f"⚡ Immediate feedback sent in {(time.time() - start_time)*1000:.0f}ms")
+
         # Get session history
-        messages = self._get_session_messages(session_id)
+        messages = await self._get_session_messages(
+            session_id=session_id,
+            user_id=user_id,
+            datasource=datasource,
+            db=db,
+        )
 
         # Add user message to history
-        messages.append({"role": "user", "content": message})
+        user_message = {"role": "user", "content": message}
+        messages.append(user_message)
 
-        # Get available tools from MCP server
+        # Get available tools from MCP server (with caching)
         tools = await self._get_tools(datasource)
 
         # Create system prompt
         system_prompt = self._create_system_prompt(datasource)
 
-        # Process with streaming Claude - True character-by-character streaming like ChatGPT
-        full_response = ""
+        # TRY FAST PATH: Use Haiku for simple tool routing
+        fast_tools = await self._fast_tool_routing(message, tools, datasource)
 
-        async for chunk in self._call_claude_stream(messages, tools, system_prompt, datasource):
-            full_response += chunk
-            # Send each character immediately for smooth ChatGPT-like streaming
-            for char in chunk:
-                yield char
+        if fast_tools:
+            # FAST PATH: Haiku identified tools, execute in parallel
+            logger.info(f"⚡ Using FAST PATH with {len(fast_tools)} tool(s)")
+            yield "✓ Found relevant data...\n\n"
+
+            # Execute tools in parallel
+            tool_results = await self._execute_tools_parallel(
+                fast_tools, datasource, credential_session_id, user_id, db
+            )
+
+            # Build context from tool results for Sonnet to generate response
+            tool_context = "\n\n".join([
+                f"Tool: {r['tool']}\nResult: {r.get('result', r.get('error', 'No result'))}"
+                for r in tool_results
+            ])
+
+            # Add tool results to messages for context
+            messages.append({
+                "role": "assistant",
+                "content": f"I retrieved the following data:\n{tool_context[:2000]}"
+            })
+            messages.append({
+                "role": "user",
+                "content": "Based on the data above, please provide a clear, well-formatted response to my original question."
+            })
+
+            # Now use Sonnet just for response generation (no tools needed)
+            generation_start = time.time()
+
+            # Use async queue to bridge sync streaming to async for true streaming
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def run_fast_stream():
+                """Run sync stream in thread, put events in queue immediately."""
+                try:
+                    stream = self.client.messages.stream(
+                        model="claude-sonnet-4-5-20250929",
+                        max_tokens=4096,
+                        system=system_prompt,
+                        messages=messages,
+                    )
+                    with stream as event_stream:
+                        for event in event_stream:
+                            if event.type == "content_block_delta":
+                                if hasattr(event.delta, "text"):
+                                    # Put text in queue immediately
+                                    queue.put_nowait({"type": "text", "content": event.delta.text})
+                    queue.put_nowait(None)  # Signal completion
+                except Exception as e:
+                    logger.error(f"Fast stream error: {e}")
+                    queue.put_nowait({"type": "error", "error": str(e)})
+                    queue.put_nowait(None)
+
+            # Start streaming in background thread
+            loop = asyncio.get_event_loop()
+            stream_task = loop.run_in_executor(_stream_executor, run_fast_stream)
+
+            # Yield events as they arrive in the queue
+            full_response = ""
+            while True:
+                try:
+                    # Wait for events with timeout to avoid blocking forever
+                    event = await asyncio.wait_for(queue.get(), timeout=60.0)
+                    if event is None:
+                        break  # Stream complete
+                    if event.get("type") == "text":
+                        chunk = event["content"]
+                        full_response += chunk
+                        yield {"type": "text", "content": chunk}  # Yield as structured event
+                    elif event.get("type") == "error":
+                        yield {"type": "text", "content": f"\n\nError: {event['error']}"}
+                        break
+                except asyncio.TimeoutError:
+                    logger.warning("Stream timeout in fast path")
+                    break
+
+            # Wait for background thread to complete
+            await stream_task
+
+            PERF_METRICS["sonnet_generation_time"].append(time.time() - generation_start)
+            logger.info(f"⚡ FAST PATH total time: {time.time() - start_time:.2f}s")
+
+        else:
+            # STANDARD PATH: Complex query, use full Sonnet flow
+            logger.info(f"📝 Using STANDARD PATH (complex query)")
+            yield {"type": "thinking", "content": "🔄 *Analyzing your request...*"}
+
+            full_response = ""
+            async for event in self._call_claude_stream(messages, tools, system_prompt, datasource, credential_session_id, user_id, db):
+                # Handle structured events from _call_claude_stream
+                if isinstance(event, dict):
+                    if event.get("type") == "text":
+                        full_response += event.get("content", "")
+                    yield event  # Forward the structured event
+                else:
+                    # Plain text (legacy fallback)
+                    full_response += str(event)
+                    yield event
+
+            logger.info(f"📝 STANDARD PATH total time: {time.time() - start_time:.2f}s")
 
         # Add assistant message to history
-        messages.append({"role": "assistant", "content": full_response})
+        assistant_message = {"role": "assistant", "content": full_response}
+        messages.append(assistant_message)
+
+        # Save to database if authenticated user
+        if user_id and db:
+            try:
+                await self.save_chat_history(
+                    user_id=user_id,
+                    session_id=session_id,
+                    datasource=datasource,
+                    messages=[user_message, assistant_message],
+                    db=db,
+                )
+            except Exception as e:
+                logger.error(f"Failed to save chat history: {str(e)}")
+                # Don't fail the request if saving fails
 
     async def _get_tools(self, datasource: str) -> List[dict]:
-        """Get available tools from MCP server."""
-        try:
-            async with mcp_service.get_client(datasource) as session:
-                tools_result = await session.list_tools()
-
-                # Convert MCP tools to Claude format
-                claude_tools = []
-                for tool in tools_result.tools:
-                    claude_tools.append({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.inputSchema,
-                    })
-
-                return claude_tools
-        except Exception as e:
-            logger.error(f"Failed to get tools for {datasource}: {str(e)}")
-            return []
+        """Get available tools from MCP server with caching for speed."""
+        # Use the cached version for faster repeated lookups
+        return await mcp_service.get_cached_tools(datasource)
 
     def _create_system_prompt(self, datasource: str) -> str:
         """Create system prompt for Claude."""
@@ -485,17 +817,33 @@ Current data source: {connector_name}
             base_prompt += """
 
 JIRA-SPECIFIC GUIDELINES:
-1. **Always call list_projects FIRST** when you don't know the project key
-2. **JQL queries are REQUIRED** - never call search_issues with empty parameters
-3. **Common queries for user questions:**
-   - "How many open issues?" → Use JQL: 'status = Open' or 'status != Closed'
-   - "Who is working on what?" → Use JQL: 'assignee is not EMPTY' (returns issues with assignees)
-   - "Show me [person]'s work" → Use JQL: 'assignee = "[Full Name]"'
-   - "What's the status of [project]?" → First list_projects, then use JQL: 'project = KEY'
-4. **Two-step workflow:**
-   - Step 1: Call list_projects to get available project keys
-   - Step 2: Use the project key in your JQL query
-5. **Count results** from the returned data - the 'total' field shows the count
+
+🎯 **RECOMMENDED: Use the query_jira tool for ALL user queries!**
+
+The query_jira tool automatically handles:
+- Name matching ("austin" → "Austin Prabu")
+- Project name resolution ("Oralia-v2" → project key "ORALIA")
+- Status filters ("open issues", "closed", "backlog")
+- Count detection ("how many")
+- JQL generation
+
+**How to use query_jira:**
+Simply pass the user's question directly to it:
+- query_jira({"query": "What is austin working on in Oralia-v2?"})
+- query_jira({"query": "How many open bugs are there?"})
+- query_jira({"query": "Show me the backlog"})
+
+**When to use other tools:**
+Only use list_projects, get_project, search_issues, etc. when:
+- User explicitly asks for ALL projects: use list_projects
+- User asks for specific issue details by key: use get_issue
+- You need to create/update issues: use create_issue, update_issue
+- query_jira didn't return the expected results
+
+**Response Format:**
+- Always show the 'total' count from results
+- Display issue keys, summaries, statuses, and assignees clearly
+- For count queries, emphasize the number in your response
 """
 
         # Add S3-specific guidance
@@ -548,16 +896,305 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
 
         return base_prompt
 
+    def _direct_tool_routing(
+        self,
+        message: str,
+        datasource: str,
+    ) -> Optional[List[dict]]:
+        """
+        INSTANT tool routing for simple, common queries.
+        Skips Haiku entirely (~1-2 seconds saved).
+        Returns tool calls directly for known patterns.
+        """
+        message_lower = message.lower().strip()
+
+        # S3 direct patterns
+        if datasource == "s3":
+            if any(kw in message_lower for kw in ["bucket", "buckets", "what bucket", "list bucket", "show bucket"]):
+                return [{"tool": "list_buckets", "args": {}}]
+
+        # JIRA direct patterns
+        if datasource == "jira":
+            if any(kw in message_lower for kw in ["project", "projects", "list project", "show project", "what project"]):
+                return [{"tool": "list_projects", "args": {}}]
+
+            # Any question about work/issues/tasks - use query_jira directly
+            if any(kw in message_lower for kw in [
+                "working on", "assigned", "issue", "task", "sprint", "backlog",
+                "bug", "story", "ticket", "open", "closed", "status", "who"
+            ]):
+                return [{"tool": "query_jira", "args": {"query": message}}]
+
+        # MySQL direct patterns
+        if datasource == "mysql":
+            if any(kw in message_lower for kw in ["table", "tables", "list table", "show table", "what table"]):
+                return [{"tool": "list_tables", "args": {}}]
+
+        # Google Workspace direct patterns
+        if datasource == "google_workspace":
+            if any(kw in message_lower for kw in ["calendar", "event", "meeting", "schedule"]):
+                return [{"tool": "get_events", "args": {}}]
+            if any(kw in message_lower for kw in ["email", "mail", "inbox", "gmail"]):
+                return [{"tool": "list_messages", "args": {}}]
+            if any(kw in message_lower for kw in ["drive", "file", "doc", "sheet", "document"]):
+                return [{"tool": "search_drive_files", "args": {}}]
+
+        return None  # Not a simple pattern, use Haiku or Sonnet
+
+    async def _fast_tool_routing(
+        self,
+        message: str,
+        tools: List[dict],
+        datasource: str,
+    ) -> Optional[List[dict]]:
+        """
+        Use Claude Haiku for fast tool selection (< 500ms).
+        Returns list of tool calls to make, or None if complex query needs Sonnet.
+        """
+        # FIRST: Try direct routing (instant, no LLM call)
+        direct_result = self._direct_tool_routing(message, datasource)
+        if direct_result:
+            logger.info(f"⚡⚡ DIRECT routing (no LLM) for: {[t['tool'] for t in direct_result]}")
+            return direct_result
+
+        start_time = time.time()
+
+        # Create a minimal prompt for tool routing
+        routing_prompt = f"""You are a fast tool router. Given a user query and available tools, determine which tool(s) to call.
+
+RULES:
+1. Return ONLY tool calls, no explanations
+2. If the query is simple and maps directly to a tool, return the tool call
+3. If the query is complex or ambiguous, return empty (let the main model handle it)
+4. For {datasource}, prefer the most direct tool
+
+Available tools: {json.dumps([{'name': t['name'], 'description': t['description'][:100]} for t in tools])}
+
+Respond with a JSON array of tool calls, or empty array [] if unsure.
+Example: [{{"tool": "list_buckets", "args": {{}}}}]
+"""
+
+        try:
+            response = self.client.messages.create(
+                model="claude-3-5-haiku-20241022",  # Fast model for routing
+                max_tokens=500,
+                system=routing_prompt,
+                messages=[{"role": "user", "content": message}],
+            )
+
+            elapsed = time.time() - start_time
+            PERF_METRICS["haiku_routing_time"].append(elapsed)
+            logger.info(f"⚡ Haiku routing completed in {elapsed:.2f}s")
+
+            # Parse response
+            response_text = response.content[0].text if response.content else "[]"
+
+            # Try to extract JSON from response
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                tool_calls = json.loads(json_match.group())
+                if tool_calls:
+                    logger.info(f"⚡ Haiku routed to tools: {[t['tool'] for t in tool_calls]}")
+                    return tool_calls
+
+            return None  # Let Sonnet handle it
+
+        except Exception as e:
+            logger.warning(f"Fast routing failed, falling back to Sonnet: {e}")
+            return None
+
+    async def _execute_tools_parallel(
+        self,
+        tool_calls: List[dict],
+        datasource: str,
+        credential_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> List[dict]:
+        """
+        Execute multiple tool calls in parallel for speed.
+        """
+        start_time = time.time()
+
+        async def execute_single_tool(tool_call: dict) -> dict:
+            tool_name = tool_call.get("tool") or tool_call.get("name")
+            arguments = tool_call.get("args") or tool_call.get("arguments", {})
+
+            try:
+                result = await mcp_service.call_tool(
+                    datasource=datasource,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    user_id=user_id,
+                    session_id=credential_session_id if not user_id else None,
+                    db=db,
+                )
+
+                result_text = ""
+                if result:
+                    for content in result:
+                        if hasattr(content, "text"):
+                            result_text += content.text
+
+                return {
+                    "tool": tool_name,
+                    "success": True,
+                    "result": result_text,
+                }
+            except Exception as e:
+                logger.error(f"Tool {tool_name} failed: {e}")
+                return {
+                    "tool": tool_name,
+                    "success": False,
+                    "error": str(e),
+                }
+
+        # Execute all tools in parallel
+        results = await asyncio.gather(
+            *[execute_single_tool(tc) for tc in tool_calls],
+            return_exceptions=True
+        )
+
+        elapsed = time.time() - start_time
+        PERF_METRICS["tool_execution_time"].append(elapsed)
+        logger.info(f"⚡ Parallel tool execution completed in {elapsed:.2f}s ({len(tool_calls)} tools)")
+
+        # Convert exceptions to error results
+        final_results = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                final_results.append({
+                    "tool": tool_calls[i].get("tool", "unknown"),
+                    "success": False,
+                    "error": str(r),
+                })
+            else:
+                final_results.append(r)
+
+        return final_results
+
+    def _can_use_ultra_fast_path(self, message: str, datasource: str) -> bool:
+        """
+        Check if we can use ultra-fast path (skip Claude entirely).
+        Only for very simple, direct queries where we can format the response ourselves.
+        """
+        message_lower = message.lower().strip()
+
+        # S3: List buckets - very simple response
+        if datasource == "s3":
+            if any(kw in message_lower for kw in ["bucket", "buckets", "what bucket"]):
+                return True
+
+        # JIRA: List projects - simple table response
+        if datasource == "jira":
+            if any(kw in message_lower for kw in ["project", "projects", "what project"]):
+                return True
+
+        return False
+
+    def _format_ultra_fast_response(self, datasource: str, tool_name: str, result: str) -> str:
+        """
+        Format tool results directly without Claude (ultra-fast path).
+        """
+        import json
+
+        try:
+            data = json.loads(result)
+        except:
+            # Can't parse, fall back to regular path
+            return None
+
+        if datasource == "s3" and tool_name == "list_buckets":
+            buckets = data.get("buckets", [])
+            if not buckets:
+                return "No S3 buckets found in your account."
+
+            response = f"## 🪣 Your S3 Buckets ({len(buckets)} found)\n\n"
+            response += "| Bucket Name | Created |\n"
+            response += "|------------|--------|\n"
+            for bucket in buckets:
+                name = bucket.get("name", "Unknown")
+                created = bucket.get("creation_date", "Unknown")[:10] if bucket.get("creation_date") else "Unknown"
+                response += f"| {name} | {created} |\n"
+            return response
+
+        if datasource == "jira" and tool_name == "list_projects":
+            projects = data.get("projects", [])
+            if not projects:
+                return "No JIRA projects found."
+
+            response = f"## 📊 Your JIRA Projects ({len(projects)} found)\n\n"
+            response += "| Key | Name | Type |\n"
+            response += "|-----|------|------|\n"
+            for proj in projects[:15]:  # Limit to first 15
+                key = proj.get("key", "")
+                name = proj.get("name", "")[:40]  # Truncate long names
+                ptype = proj.get("type", proj.get("projectTypeKey", ""))
+                response += f"| {key} | {name} | {ptype} |\n"
+
+            if len(projects) > 15:
+                response += f"\n*...and {len(projects) - 15} more projects*"
+            return response
+
+        return None  # Can't format, use regular path
+
+    def _get_immediate_feedback_message(self, datasource: str, message: str) -> str:
+        """Generate an immediate feedback message based on query type."""
+        message_lower = message.lower()
+
+        # Datasource-specific messages
+        if datasource == "s3":
+            if "bucket" in message_lower or "list" in message_lower:
+                return "🪣 *Checking your S3 buckets...*"
+            elif "read" in message_lower or "content" in message_lower or "file" in message_lower:
+                return "📄 *Reading document...*"
+            elif "search" in message_lower:
+                return "🔍 *Searching documents...*"
+            return "☁️ *Connecting to S3...*"
+
+        elif datasource == "jira":
+            if "project" in message_lower:
+                return "📊 *Fetching JIRA projects...*"
+            elif "sprint" in message_lower:
+                return "🏃 *Loading sprint data...*"
+            elif "assign" in message_lower or "working" in message_lower or "who" in message_lower:
+                return "👥 *Checking team assignments...*"
+            elif "backlog" in message_lower:
+                return "📋 *Analyzing backlog...*"
+            return "🎫 *Querying JIRA...*"
+
+        elif datasource == "mysql":
+            if "table" in message_lower:
+                return "📊 *Listing tables...*"
+            elif "schema" in message_lower or "structure" in message_lower:
+                return "🔧 *Fetching schema...*"
+            return "🗄️ *Querying database...*"
+
+        elif datasource == "google_workspace":
+            if "calendar" in message_lower:
+                return "📅 *Checking calendar...*"
+            elif "email" in message_lower or "gmail" in message_lower:
+                return "📧 *Loading emails...*"
+            elif "doc" in message_lower or "sheet" in message_lower:
+                return "📝 *Fetching documents...*"
+            return "🔗 *Connecting to Google Workspace...*"
+
+        return "⚡ *Processing...*"
+
     async def _call_claude(
         self,
         messages: List[dict],
         tools: List[dict],
         system_prompt: str,
         datasource: str,
+        credential_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
     ) -> tuple[str, List[dict]]:
         """Call Claude API with tool support."""
         tool_calls_made = []
-        max_iterations = 5  # Prevent infinite loops
+        max_iterations = 25  # Allow more iterations for complex queries
 
         for iteration in range(max_iterations):
             # Call Claude
@@ -676,12 +1313,33 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
                     elif is_invalid:
                         logger.warning(f"⚠️ USER_GOOGLE_EMAIL not configured in settings")
 
+                # Auto-fix missing parameters for JIRA tools
+                if datasource == "jira":
+                    # Handle query_jira - needs query parameter
+                    if tool_use.name == "query_jira":
+                        if "query" not in tool_use.input or not tool_use.input.get("query"):
+                            logger.info(f"Query parameter missing in query_jira, attempting auto-injection...")
+                            # Get the most recent user message
+                            for msg in reversed(messages):
+                                if msg.get("role") == "user":
+                                    user_query = msg.get("content")
+                                    if user_query and isinstance(user_query, str):
+                                        tool_use.input["query"] = user_query
+                                        logger.info(f"✅ Auto-injected query parameter from user message")
+                                        break
+
                 logger.info(f"Claude calling tool: {tool_use.name} with args: {tool_use.input}")
 
                 try:
                     # Call the MCP tool
+                    # Prioritize user_id over session_id for credentials
                     result = await mcp_service.call_tool(
-                        datasource, tool_use.name, tool_use.input
+                        datasource=datasource,
+                        tool_name=tool_use.name,
+                        arguments=tool_use.input,
+                        user_id=user_id,
+                        session_id=credential_session_id if not user_id else None,
+                        db=db,
                     )
 
                     # Extract text content from result
@@ -731,36 +1389,75 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
         tools: List[dict],
         system_prompt: str,
         datasource: str,
+        credential_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
     ) -> AsyncGenerator[str, None]:
-        """Call Claude API with streaming and tool support."""
-        max_iterations = 10  # Increased to allow more attempts for debugging
+        """Call Claude API with streaming and tool support - TRUE ASYNC STREAMING."""
+        max_iterations = 25  # Increased to allow more attempts for complex queries
 
         for iteration in range(max_iterations):
-            # Call Claude with streaming
-            stream = self.client.messages.stream(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
-                system=system_prompt,
-                messages=messages,
-                tools=tools if tools else None,
-            )
+            # Use async queue to bridge sync streaming to async for true streaming
+            queue: asyncio.Queue = asyncio.Queue()
+            final_message_holder = {"message": None}
 
+            def run_claude_stream():
+                """Run sync stream in thread, put events in queue immediately."""
+                try:
+                    stream = self.client.messages.stream(
+                        model="claude-sonnet-4-5-20250929",
+                        max_tokens=4096,
+                        system=system_prompt,
+                        messages=messages,
+                        tools=tools if tools else None,
+                    )
+                    with stream as event_stream:
+                        for event in event_stream:
+                            if event.type == "content_block_delta":
+                                if hasattr(event.delta, "text"):
+                                    # Put text in queue immediately for streaming
+                                    queue.put_nowait({"type": "text", "content": event.delta.text})
+                            elif event.type == "content_block_start":
+                                if hasattr(event.content_block, "type") and event.content_block.type == "tool_use":
+                                    queue.put_nowait({"type": "tool_start", "block": event.content_block})
+                        # Get final message before exiting context
+                        final_message_holder["message"] = event_stream.get_final_message()
+                    queue.put_nowait(None)  # Signal completion
+                except Exception as e:
+                    logger.error(f"Stream error: {e}")
+                    queue.put_nowait({"type": "error", "error": str(e)})
+                    queue.put_nowait(None)
+
+            # Start streaming in background thread
+            loop = asyncio.get_event_loop()
+            stream_task = loop.run_in_executor(_stream_executor, run_claude_stream)
+
+            # Collect events as they arrive
             tool_use_blocks = []
             text_chunks = []
 
-            with stream as event_stream:
-                for event in event_stream:
-                    if event.type == "content_block_delta":
-                        if hasattr(event.delta, "text"):
-                            # Stream text chunks
-                            text_chunks.append(event.delta.text)
-                            yield event.delta.text
-                    elif event.type == "content_block_start":
-                        if hasattr(event.content_block, "type") and event.content_block.type == "tool_use":
-                            tool_use_blocks.append(event.content_block)
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=120.0)
+                    if event is None:
+                        break  # Stream complete
+                    if event.get("type") == "text":
+                        text_chunks.append(event["content"])
+                        yield {"type": "text", "content": event["content"]}  # Stream immediately as structured event!
+                    elif event.get("type") == "tool_start":
+                        tool_use_blocks.append(event["block"])
+                    elif event.get("type") == "error":
+                        yield {"type": "text", "content": f"\n\nError: {event['error']}"}
+                        break
+                except asyncio.TimeoutError:
+                    logger.warning("Stream timeout in _call_claude_stream")
+                    break
+
+            # Wait for background thread to complete
+            await stream_task
 
             # Get the final message
-            final_message = event_stream.get_final_message()
+            final_message = final_message_holder["message"]
 
             # Check for tool use
             if not tool_use_blocks and final_message:
@@ -860,15 +1557,37 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
                             else:
                                 logger.warning(f"⚠️ Failed to extract table name")
 
-                # Show tool execution feedback with quirky message
+                # Auto-fix missing parameters for JIRA tools
+                if datasource == "jira":
+                    # Handle query_jira - needs query parameter
+                    if tool_use.name == "query_jira":
+                        if "query" not in tool_use.input or not tool_use.input.get("query"):
+                            logger.info(f"Query parameter missing in query_jira, attempting auto-injection...")
+                            # Get the most recent user message
+                            for msg in reversed(messages):
+                                if msg.get("role") == "user":
+                                    user_query = msg.get("content")
+                                    if user_query and isinstance(user_query, str):
+                                        tool_use.input["query"] = user_query
+                                        logger.info(f"✅ Auto-injected query parameter from user message")
+                                        break
+
+                # Send tool_start event with quirky message
                 tool_feedback = get_quirky_thinking_message(tool_use.name)
-                yield tool_feedback
+                yield {"type": "tool_start", "tool": tool_use.name, "description": tool_feedback}
 
                 logger.info(f"Claude calling tool: {tool_use.name} with args: {tool_use.input}")
 
                 try:
+                    # Call the MCP tool
+                    # Prioritize user_id over session_id for credentials
                     result = await mcp_service.call_tool(
-                        datasource, tool_use.name, tool_use.input
+                        datasource=datasource,
+                        tool_name=tool_use.name,
+                        arguments=tool_use.input,
+                        user_id=user_id,
+                        session_id=credential_session_id if not user_id else None,
+                        db=db,
                     )
 
                     result_text = ""
@@ -883,8 +1602,8 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
                         "content": result_text,
                     })
 
-                    # Show completion
-                    yield " ✓]\n"
+                    # Send tool_end event
+                    yield {"type": "tool_end", "tool": tool_use.name, "success": True}
 
                 except Exception as e:
                     logger.error(f"Tool call failed: {str(e)}")
@@ -894,9 +1613,8 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
                         "content": f"Error: {str(e)}",
                         "is_error": True,
                     })
-
-                    # Show error
-                    yield f" ✗ Error: {str(e)}]\n"
+                    # Send tool_end event with error
+                    yield {"type": "tool_end", "tool": tool_use.name, "success": False, "error": str(e)}
 
             # Add tool results to messages and continue
             messages.append({
