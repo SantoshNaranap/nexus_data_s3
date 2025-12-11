@@ -32,6 +32,7 @@ fi
 
 if [[ "$GIT_BRANCH" == "devops-dev" || "$GIT_BRANCH" == "uat" || "$GIT_BRANCH" == "preprod" ]];
 then
+aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs
 DevBuild
 elif [[ "$GIT_BRANCH" == "master" ]];
 then
