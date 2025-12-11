@@ -16,6 +16,16 @@
             "protocol": "tcp"
           }
         ],
+        "healthCheck": {
+          "command": [
+            "CMD-SHELL",
+            "python -c \"import urllib.request; import sys; response = urllib.request.urlopen('http://localhost:8000/health', timeout=5); sys.exit(0) if response.getcode() == 200 else sys.exit(1)\""
+          ],
+          "interval": 30,
+          "timeout": 10,
+          "retries": 3,
+          "startPeriod": 120
+        },
         "logConfiguration": {
           "logDriver": "awslogs",
           "options": {
