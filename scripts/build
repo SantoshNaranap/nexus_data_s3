@@ -2,8 +2,12 @@
 
 DevBuild()
 {
-ECR_REPO=891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend
-DOCKER_BUILD_TAG=$GIT_BRANCH-${BUILD_NUMBER}
+ECR_REGISTRY=891377352857.dkr.ecr.us-east-1.amazonaws.com
+FRONTEND_REPO=${ECR_REGISTRY}/mosaic-frontend
+BACKEND_REPO=${ECR_REGISTRY}/mosaic-backend
+DOCKER_BUILD_TAG=${GIT_BRANCH}-${BUILD_NUMBER}
+
+# Build images using docker-compose
 docker-compose build
 if [ $? -eq 0 ]; then 
 echo "Docker build got success"
@@ -11,14 +15,112 @@ else
 echo "Docker build was failed"
 exit 1
 fi
-docker images -q $ECR_REPO
-aws ecr get-login-password --region us-east-1 --profile kaaylabs | docker login --username AWS --password-stdin 891377352857.dkr.ecr.us-east-1.amazonaws.com
-IMAGE_ID=$(docker images -q $ECR_REPO | awk "NR==1{print $1}")
-echo $IMAGE_ID
-docker tag $IMAGE_ID $ECR_REPO:latest
-docker inspect $IMAGE_ID
-docker push 891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend:$GIT_BRANCH-${BUILD_NUMBER}
-docker push 891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-backend:$GIT_BRANCH-${BUILD_NUMBER}
+
+# Login to ECR
+aws ecr get-login-password --region us-east-1 --profile kaaylabs | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+# Get image names from docker-compose
+# docker-compose names images as: <project>_<service> (default project is directory name, lowercase)
+echo "Finding built images..."
+docker images | grep -E "frontend|backend"
+
+# Get the project name from docker-compose (usually the directory name in lowercase)
+PROJECT_NAME=$(basename $(pwd) | tr '[:upper:]' '[:lower:]')
+
+# Try to get image IDs using docker-compose image names
+# Format: <project>_<service> or <project>-<service>
+FRONTEND_IMAGE_NAME="${PROJECT_NAME}_frontend"
+BACKEND_IMAGE_NAME="${PROJECT_NAME}_backend"
+
+# Try underscore first, then hyphen
+FRONTEND_IMAGE_ID=$(docker images -q ${FRONTEND_IMAGE_NAME}:latest 2>/dev/null | head -1)
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  FRONTEND_IMAGE_NAME="${PROJECT_NAME}-frontend"
+  FRONTEND_IMAGE_ID=$(docker images -q ${FRONTEND_IMAGE_NAME}:latest 2>/dev/null | head -1)
+fi
+
+BACKEND_IMAGE_ID=$(docker images -q ${BACKEND_IMAGE_NAME}:latest 2>/dev/null | head -1)
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  BACKEND_IMAGE_NAME="${PROJECT_NAME}-backend"
+  BACKEND_IMAGE_ID=$(docker images -q ${BACKEND_IMAGE_NAME}:latest 2>/dev/null | head -1)
+fi
+
+# If still not found, try without latest tag
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  FRONTEND_IMAGE_ID=$(docker images -q ${PROJECT_NAME}_frontend 2>/dev/null | head -1)
+fi
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  FRONTEND_IMAGE_ID=$(docker images -q ${PROJECT_NAME}-frontend 2>/dev/null | head -1)
+fi
+
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  BACKEND_IMAGE_ID=$(docker images -q ${PROJECT_NAME}_backend 2>/dev/null | head -1)
+fi
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  BACKEND_IMAGE_ID=$(docker images -q ${PROJECT_NAME}-backend 2>/dev/null | head -1)
+fi
+
+# Last resort: find by service label or reference pattern
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  FRONTEND_IMAGE_ID=$(docker images --format "{{.ID}}" --filter "label=com.docker.compose.service=frontend" 2>/dev/null | head -1)
+fi
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  FRONTEND_IMAGE_ID=$(docker images --format "{{.ID}}" --filter "reference=*frontend*" 2>/dev/null | head -1)
+fi
+
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  BACKEND_IMAGE_ID=$(docker images --format "{{.ID}}" --filter "label=com.docker.compose.service=backend" 2>/dev/null | head -1)
+fi
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  BACKEND_IMAGE_ID=$(docker images --format "{{.ID}}" --filter "reference=*backend*" 2>/dev/null | head -1)
+fi
+
+# Check if images were found
+if [ -z "$FRONTEND_IMAGE_ID" ]; then
+  echo "Error: Frontend image not found"
+  docker images | grep -E "mosaic|frontend"
+  exit 1
+fi
+
+if [ -z "$BACKEND_IMAGE_ID" ]; then
+  echo "Error: Backend image not found"
+  docker images | grep -E "mosaic|backend"
+  exit 1
+fi
+
+echo "Frontend Image ID: $FRONTEND_IMAGE_ID"
+echo "Backend Image ID: $BACKEND_IMAGE_ID"
+
+# Tag frontend image
+docker tag ${FRONTEND_IMAGE_ID} ${FRONTEND_REPO}:${DOCKER_BUILD_TAG}
+docker tag ${FRONTEND_IMAGE_ID} ${FRONTEND_REPO}:latest
+
+# Tag backend image
+docker tag ${BACKEND_IMAGE_ID} ${BACKEND_REPO}:${DOCKER_BUILD_TAG}
+docker tag ${BACKEND_IMAGE_ID} ${BACKEND_REPO}:latest
+
+# Verify tags
+docker inspect ${FRONTEND_REPO}:${DOCKER_BUILD_TAG} > /dev/null
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to tag frontend image"
+  exit 1
+fi
+
+docker inspect ${BACKEND_REPO}:${DOCKER_BUILD_TAG} > /dev/null
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to tag backend image"
+  exit 1
+fi
+
+# Push images
+echo "Pushing frontend image..."
+docker push ${FRONTEND_REPO}:${DOCKER_BUILD_TAG}
+docker push ${FRONTEND_REPO}:latest
+
+echo "Pushing backend image..."
+docker push ${BACKEND_REPO}:${DOCKER_BUILD_TAG}
+docker push ${BACKEND_REPO}:latest
+
 if [ $? -eq 0 ]; then 
 echo "Docker Push got success"
 docker logout
