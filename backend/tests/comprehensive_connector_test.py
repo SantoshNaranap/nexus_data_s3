@@ -21,8 +21,10 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 import sys
 
+import os
+
 # Configuration
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 STREAM_ENDPOINT = "/api/chat/message/stream"
 NON_STREAM_ENDPOINT = "/api/chat/message"
 

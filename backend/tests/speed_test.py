@@ -6,7 +6,9 @@ import time
 import aiohttp
 import json
 
-BASE_URL = "http://localhost:8000"
+import os
+
+BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 async def measure_query(session, datasource: str, message: str, description: str):
     """Measure time for a single query."""

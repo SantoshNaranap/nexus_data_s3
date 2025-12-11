@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # API Configuration
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
+    api_base_url: str = "http://localhost:8000"
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 
     @property
@@ -66,7 +67,7 @@ class Settings(BaseSettings):
         return self.environment.lower() == "production"
 
     # Anthropic Claude
-    anthropic_api_key: str
+    anthropic_api_key: str = ""
 
     # AWS S3
     aws_access_key_id: str = ""
@@ -110,7 +111,7 @@ class Settings(BaseSettings):
     github_token: str = ""  # Personal Access Token or GitHub App token
 
     # JWT Configuration
-    jwt_secret_key: str
+    jwt_secret_key: str = "insecure-jwt-secret-key-dev-only"
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 1440
 

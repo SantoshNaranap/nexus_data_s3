@@ -10,8 +10,19 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements
 COPY backend/requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies for backend
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy connectors source code
+COPY connectors /connectors
+
+# Install dependencies for each connector
+# Note: Google Workspace connector has many dependencies, better to install them
+RUN pip install -e /connectors/jira \
+    && pip install -e /connectors/s3 \
+    && pip install -e /connectors/mysql \
+    && pip install -e /connectors/shopify \
+    && pip install -e /connectors/google_workspace
 
 # Copy application code
 COPY backend/ .

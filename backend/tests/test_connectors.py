@@ -7,9 +7,10 @@ Tests natural language conversation, context switching, and speed.
 import requests
 import json
 import time
+import os
 from typing import List, Dict
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 session_id_s3 = None
 session_id_mysql = None
 

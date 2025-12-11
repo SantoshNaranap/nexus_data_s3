@@ -16,7 +16,9 @@ import aiohttp
 import json
 from datetime import datetime
 
-BASE_URL = "http://localhost:8000"
+import os
+
+BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 # Colors for terminal output
 GREEN = "\033[92m"
