@@ -1,0 +1,31 @@
+{
+    "family": "mosaic-frontend",
+    "taskRoleArn": "arn:aws:iam::891377352857:role/dev-adfarm",
+    "containerDefinitions": [
+      {
+        "name": "mosaic-frontend",
+        "image": "891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend:GIT_COMMIT",
+        "cpu": 500,
+        "memory": 500,
+        "memoryReservation": 700,
+        "volumesFrom": [],
+        "portMappings": [
+          {
+            "hostPort": 0,
+            "containerPort": 80,
+            "protocol": "tcp"
+          }
+        ],
+        "logConfiguration": {
+          "logDriver": "awslogs",
+          "options": {
+            "awslogs-group": "GROUP_NAME",
+            "awslogs-region": "us-east-1",
+            "awslogs-stream-prefix": "mosaic-frontend"
+          }
+        },
+        "environment": [],
+        "mountPoints": []
+      }
+    ]
+  }

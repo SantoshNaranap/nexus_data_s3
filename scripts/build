@@ -1,0 +1,44 @@
+#!/bin/bash
+
+DevBuild()
+{
+ECR_REPO=891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend
+DOCKER_BUILD_TAG=$GIT_BRANCH-${BUILD_NUMBER}
+docker-compose build
+if [ $? -eq 0 ]; then 
+echo "Docker build got success"
+else 
+echo "Docker build was failed"
+exit 1
+fi
+docker images -q $ECR_REPO
+aws ecr get-login-password --region us-east-1 --profile kaaylabs | docker login --username AWS --password-stdin 891377352857.dkr.ecr.us-east-1.amazonaws.com
+IMAGE_ID=$(docker images -q $ECR_REPO | awk "NR==1{print $1}")
+echo $IMAGE_ID
+docker tag $IMAGE_ID $ECR_REPO:latest
+docker inspect $IMAGE_ID
+docker push 891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend:$GIT_BRANCH-${BUILD_NUMBER}
+docker push 891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-backend:$GIT_BRANCH-${BUILD_NUMBER}
+if [ $? -eq 0 ]; then 
+echo "Docker Push got success"
+docker logout
+else 
+echo "Docker Push was failed"
+docker logout
+exit 1
+fi
+}
+
+
+if [[ "$GIT_BRANCH" == "devops-dev" || "$GIT_BRANCH" == "uat" || "$GIT_BRANCH" == "preprod" ]];
+then
+DevBuild
+elif [[ "$GIT_BRANCH" == "master" ]];
+then
+aws s3 cp s3://kaaylabs-operations-new/config/gig-street-web/$GIT_BRANCH/.env.business . --profile kaaylabs
+aws s3 cp s3://kaaylabs-operations-new/config/gig-street-web/$GIT_BRANCH/.env.gigster . --profile kaaylabs
+DevBuild
+else
+echo "Skipping a build process because this branch is not permitted for docker build: ${GIT_BRANCH}"
+fi
+

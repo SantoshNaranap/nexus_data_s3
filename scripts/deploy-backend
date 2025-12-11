@@ -1,0 +1,56 @@
+startDeploy()
+{
+# Create a new task definition for this build
+
+sed -e "s;GIT_COMMIT;${IMAGE_VERSION};g" ${JSON_FILE}.json > ${JSON_FILE}-new-${BUILD_NUMBER}.json
+
+sed -e "s;GROUP_NAME;${GIT_BRANCH};g" ${JSON_FILE}-new-${BUILD_NUMBER}.json > ${JSON_FILE}-${BUILD_NUMBER}.json
+
+
+cat ${JSON_FILE}-${BUILD_NUMBER}.json
+
+aws ecs register-task-definition --family ${TASK_FAMILY} --cli-input-json file://${JSON_FILE}-${BUILD_NUMBER}.json --region us-east-1 --profile kaaylabs
+
+# Update the service with the new task definition and desired count
+TASK_REVISION=`aws ecs describe-task-definition --task-definition ${TASK_FAMILY} --region us-east-1 --profile kaaylabs | egrep "revision" | tr "/" " " | awk '{print $2}' | sed 's/"$//'`
+echo $TASK_REVISION
+DESIRED_COUNT=`aws ecs describe-services --cluster ${CLUSTER} --services ${SERVICE_NAME}  --region us-east-1 --profile kaaylabs  | egrep "desiredCount" | tr "/" " " | awk '{print $2}' | sed 's/,$//'`
+echo $DESIRED_COUNT
+OLD_TASK_ID=$(aws ecs list-tasks --cluster ${CLUSTER} --desired-status RUNNING --service ${SERVICE_NAME} --region us-east-1 --profile kaaylabs | egrep "task/" | sed -E "s/.*task\/(.*)\"/\1/")
+echo $OLD_TASK_ID
+aws ecs stop-task --cluster ${CLUSTER} --task ${OLD_TASK_ID} --region us-east-1 --profile kaaylabs
+aws ecs update-service --cluster ${CLUSTER} --service ${SERVICE_NAME} --desired-count 1 --task-definition ${TASK_FAMILY} --force-new-deployment --region us-east-1 --profile kaaylabs
+
+# Jenkins Job wait until service is avaliable in cluster
+aws ecs wait services-stable --cluster ${CLUSTER} --services ${SERVICE_NAME} --region us-east-1 --profile kaaylabs
+if [ $? -eq 0 ]; then
+echo "Build got deployed successfully"
+else
+echo "Build failed"
+exit 1
+fi
+rm -rf ${JSON_FILE}-${BUILD_NUMBER}.json
+rm -rf ${JSON_FILE}-new-${BUILD_NUMBER}.json
+}
+
+if [ "$GIT_BRANCH" = "devops-dev" ]
+then
+SERVICE_NAME="mosaic-backend"
+IMAGE_VERSION="${GIT_BRANCH}-${BUILD_NUMBER}"
+TASK_FAMILY="mosaic-backend"
+CLUSTER="production"
+START_CMD="start"
+JSON_FILE="backend"
+startDeploy
+elif [ "$GIT_BRANCH" = "master" ]
+then
+SERVICE_NAME="gigstreet-provider-prod"
+IMAGE_VERSION="${GIT_BRANCH}-${BUILD_NUMBER}"
+TASK_FAMILY="gigstreet-provider-prod"
+CLUSTER="gigstreet-uat"
+START_CMD="start"
+JSON_FILE="gigstreet-provider"
+startDeploy
+else
+echo "Skipping a deployment because this branch is not permitted for docker deployment: ${GIT_BRANCH}"
+fi

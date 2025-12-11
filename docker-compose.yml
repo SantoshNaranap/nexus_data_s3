@@ -1,5 +1,14 @@
 version: '3.8'
 
+# Docker Compose configuration for ECS deployment
+# Note: This configuration uses RDS MySQL instead of a local MySQL container
+# Make sure to set the following environment variables for RDS connection:
+# - LOCAL_MYSQL_HOST (your RDS endpoint)
+# - LOCAL_MYSQL_PORT (usually 3306)
+# - LOCAL_MYSQL_USER (your RDS username)
+# - LOCAL_MYSQL_PASSWORD (your RDS password)
+# - LOCAL_MYSQL_DATABASE (your database name)
+
 services:
   backend:
     build:
@@ -7,49 +16,53 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      - ./backend:/app
-      - ./connectors:/connectors
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    depends_on:
-      - mysql
-    networks:
-      - connectormcp
+    environment:
+      # Core settings
+      - ENVIRONMENT=production
+      # RDS MySQL connection (set these via environment variables or .env file)
+      - LOCAL_MYSQL_HOST=${LOCAL_MYSQL_HOST}
+      - LOCAL_MYSQL_PORT=${LOCAL_MYSQL_PORT:-3306}
+      - LOCAL_MYSQL_USER=${LOCAL_MYSQL_USER}
+      - LOCAL_MYSQL_PASSWORD=${LOCAL_MYSQL_PASSWORD}
+      - LOCAL_MYSQL_DATABASE=${LOCAL_MYSQL_DATABASE:-connectorMCP}
+      # API keys (set via environment variables)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Production command (no reload)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Backend API URL (set this to your ECS backend service URL)
+        # This is baked into the build at build time
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_URL=http://localhost:8000
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    command: npm run dev -- --host 0.0.0.0
-    networks:
-      - connectormcp
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-testdb}
-      MYSQL_USER: ${MYSQL_USER:-testuser}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-testpassword}
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks:
-      - connectormcp
-
-networks:
-  connectormcp:
-    driver: bridge
-
-volumes:
-  mysql_data:
+# Note: No MySQL service - using AWS RDS MySQL
+# Ensure your RDS instance is:
+# 1. In the same VPC as your ECS tasks
+# 2. Security group allows inbound connections from ECS tasks on port 3306
+# 3. Database and user are created before deployment

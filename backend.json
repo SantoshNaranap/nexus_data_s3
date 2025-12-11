@@ -1,0 +1,76 @@
+{
+    "family": "mosaic-backend",
+    "taskRoleArn": "arn:aws:iam::891377352857:role/dev-adfarm",
+    "containerDefinitions": [
+      {
+        "name": "mosaic-backend",
+        "image": "891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-backend:GIT_COMMIT",
+        "cpu": 500,
+        "memory": 500,
+        "memoryReservation": 700,
+        "volumesFrom": [],
+        "portMappings": [
+          {
+            "hostPort": 0,
+            "containerPort": 8000,
+            "protocol": "tcp"
+          }
+        ],
+        "logConfiguration": {
+          "logDriver": "awslogs",
+          "options": {
+            "awslogs-group": "GROUP_NAME",
+            "awslogs-region": "us-east-1",
+            "awslogs-stream-prefix": "mosaic-backend"
+          }
+        },
+        "environment": [
+          {
+            "name": "ENVIRONMENT",
+            "value": "production"
+          },
+          {
+            "name": "ANTHROPIC_API_KEY",
+            "value": ""
+          },
+          {
+            "name": "JWT_SECRET_KEY",
+            "value": ""
+          },
+          {
+            "name": "ENCRYPTION_KEY",
+            "value": ""
+          },
+          {
+            "name": "LOCAL_MYSQL_HOST",
+            "value": "kaay-migration.cre2ksyiyonw.us-east-1.rds.amazonaws.com"
+          },
+          {
+            "name": "LOCAL_MYSQL_PORT",
+            "value": "3306"
+          },
+          {
+            "name": "LOCAL_MYSQL_USER",
+            "value": "dev-mosaic"
+          },
+          {
+            "name": "LOCAL_MYSQL_PASSWORD",
+            "value": "th2dr!Gim"
+          },
+          {
+            "name": "LOCAL_MYSQL_DATABASE",
+            "value": "mosaic"
+          },
+          {
+            "name": "CORS_ORIGINS",
+            "value": ""
+          },
+          {
+            "name": "LOG_LEVEL",
+            "value": "INFO"
+          }
+        ],
+        "mountPoints": []
+      }
+    ]
+  }
