@@ -17,12 +17,12 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingMessage, setStreamingMessage] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
-  const [isThinking, setIsThinking] = useState(false)
+  const [_isThinking, setIsThinking] = useState(false)
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([])
   const [showAgentPanel, setShowAgentPanel] = useState(true)
   const [currentThought, setCurrentThought] = useState<string | undefined>()
-  const [currentSources, setCurrentSources] = useState<SourceReference[]>([])
-  const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([])
+  const [_currentSources, setCurrentSources] = useState<SourceReference[]>([])
+  const [_followUpQuestions, setFollowUpQuestions] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Step counter for unique IDs

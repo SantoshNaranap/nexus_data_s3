@@ -17,7 +17,7 @@ function AppContent() {
   const [configuredDatasources, setConfiguredDatasources] = useState<Set<string>>(new Set())
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
   const { theme, toggleTheme } = useTheme()
-  const { user, isAuthenticated } = useAuth()
+  const { user: _user, isAuthenticated } = useAuth()
 
   const { data: datasources, isLoading } = useQuery({
     queryKey: ['datasources'],
