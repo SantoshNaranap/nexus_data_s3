@@ -7,7 +7,7 @@
         "image": "891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-frontend:GIT_COMMIT",
         "cpu": 500,
         "memory": 500,
-        "memoryReservation": 700,
+        "memoryReservation": 400,
         "volumesFrom": [],
         "portMappings": [
           {
