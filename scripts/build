@@ -132,7 +132,7 @@ fi
 }
 
 
-if [[ "$GIT_BRANCH" == "devops-dev" || "$GIT_BRANCH" == "uat" || "$GIT_BRANCH" == "preprod" ]];
+if [[ "$GIT_BRANCH" == "devops-dev" || "$GIT_BRANCH" == "devops-fix" || "$GIT_BRANCH" == "preprod" ]];
 then
 aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs
 DevBuild
