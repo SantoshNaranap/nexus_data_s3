@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -25,7 +26,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting ConnectorMCP backend...")
 
-    # Initialize database on startup
+    # Initialize database on startup (quick, non-blocking)
     try:
         await init_db()
         logger.info("Database initialized successfully")
@@ -39,24 +40,40 @@ async def lifespan(app: FastAPI):
             "The app will still respond to health checks and API requests."
         )
 
-    # Pre-warm MCP connections for faster first requests
-    # Only pre-warm connectors that are configured and available
-    try:
-        connectors_to_prewarm = ["s3"]  # Start with s3 only, add jira if available
-        # Only add jira if the module is available (connector dependencies installed)
+    # Pre-warm MCP connections in background (don't block startup)
+    async def prewarm_background():
+        """Pre-warm connectors in background without blocking startup."""
         try:
-            import jira
-            connectors_to_prewarm.append("jira")
-        except ImportError:
-            logger.warning("⚠️ JIRA connector dependencies not installed, skipping jira pre-warming")
-        
-        if connectors_to_prewarm:
-            logger.info(f"🔥 Pre-warming MCP connections for: {connectors_to_prewarm}")
-            await mcp_service.prewarm_connections(connectors_to_prewarm)
-    except Exception as e:
-        logger.warning(f"Pre-warming failed (non-fatal): {e}")
+            connectors_to_prewarm = ["s3"]  # Start with s3 only
+            
+            # Only add jira if credentials are fully configured
+            jira_configured = (
+                settings.jira_url 
+                and settings.jira_email 
+                and settings.jira_api_token
+            )
+            
+            if jira_configured:
+                try:
+                    import jira
+                    connectors_to_prewarm.append("jira")
+                    logger.info("JIRA credentials configured, will pre-warm JIRA connector")
+                except ImportError:
+                    logger.warning("⚠️ JIRA connector dependencies not installed, skipping jira pre-warming")
+            else:
+                logger.info("⚠️ JIRA credentials not configured, skipping jira pre-warming")
+            
+            if connectors_to_prewarm:
+                logger.info(f"🔥 Pre-warming MCP connections for: {connectors_to_prewarm}")
+                await mcp_service.prewarm_connections(connectors_to_prewarm)
+        except Exception as e:
+            logger.warning(f"Pre-warming failed (non-fatal): {e}")
+    
+    # Start pre-warming in background (don't await - let it run in background)
+    # This allows the app to start serving requests immediately
+    asyncio.create_task(prewarm_background())
 
-    yield
+    yield  # App is now ready to serve requests (health checks will work immediately)
 
     # Close persistent MCP connections on shutdown
     try:
