@@ -470,7 +470,7 @@ Great for catching up on channel activity or finding specific discussions.""",
             description="""Search for messages across Slack.
 
 Search by keywords, in specific channels, from specific users, or within date ranges.
-Returns matching messages with context.""",
+Returns matching messages with context. Defaults to last 30 days for relevance.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -482,6 +482,11 @@ Returns matching messages with context.""",
                         "type": "integer",
                         "description": "Max results to return (default: 20)",
                         "default": 20,
+                    },
+                    "days_ago": {
+                        "type": "integer",
+                        "description": "Search messages from the last N days (default: 30). Set to 0 for all time.",
+                        "default": 30,
                     },
                 },
                 "required": ["query"],
@@ -1011,9 +1016,18 @@ async def handle_read_messages(arguments: dict) -> list[TextContent]:
 
 
 async def handle_search_messages(arguments: dict) -> list[TextContent]:
-    """Search messages."""
+    """Search messages with default time filter for relevance."""
     query = arguments["query"]
     limit = arguments.get("limit", 20)
+    days_ago = arguments.get("days_ago", 30)  # Default to last 30 days for relevance
+
+    # Add date filter to search query for recent results
+    # Slack search supports "after:YYYY-MM-DD" syntax
+    # days_ago=0 means search all time (no filter)
+    if days_ago and days_ago > 0 and "after:" not in query.lower():
+        cutoff_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        query = f"{query} after:{cutoff_date}"
+        logger.info(f"🔍 Search with date filter: {query}")
 
     # Use user client for search (better results)
     client = _get_client_for_operation("search")
@@ -1035,6 +1049,7 @@ async def handle_search_messages(arguments: dict) -> list[TextContent]:
         "total": result["messages"]["total"],
         "count": len(messages),
         "messages": messages,
+        "date_filter": f"Last {days_ago} days" if days_ago and days_ago > 0 else "All time",
     }
 
     return [TextContent(type="text", text=json.dumps(response, indent=2))]

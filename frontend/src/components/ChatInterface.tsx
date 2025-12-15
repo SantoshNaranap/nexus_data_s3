@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { chatApi } from '../services/api'
+import { agentApi } from '../services/agentApi'
 import type { DataSource, ChatMessage, AgentStep, SourceReference } from '../types'
 import MarkdownMessage from './MarkdownMessage'
 import AgentActivityPanel from './AgentActivityPanel'
@@ -144,193 +145,333 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     // Add initial thinking step
     const thinkingStepId = addAgentStep({
       type: 'thinking',
-      title: 'Analyzing query',
-      description: 'Understanding your request...',
+      title: datasource.id === 'all_sources' ? 'Planning multi-source query' : 'Analyzing query',
+      description: datasource.id === 'all_sources' ? 'Detecting relevant sources...' : 'Understanding your request...',
     })
 
     try {
-      await chatApi.sendMessageStream(
-        {
-          message: messageText,
-          datasource: datasource.id,
-          session_id: sessionId || undefined,
-        },
-        // onChunk
-        (chunk) => {
-          accumulatedMessage += chunk
-
-          // Detect status updates from the chunk
-          const isStatusUpdate = /^[🎫🪣🗄️📊✓⚡📋🔄🧠]\s*\*?.+\*?\.{3}/.test(chunk) ||
-                                 chunk.includes('✓ Found') ||
-                                 chunk.includes('Querying') ||
-                                 chunk.includes('Searching') ||
-                                 chunk.includes('Fetching') ||
-                                 chunk.includes('Analyzing') ||
-                                 chunk.includes('Loading')
-
-          if (isStatusUpdate && !hasRealContent) {
-            // Update agent panel with detected activity
-            const statusText = chunk.replace(/[*_]/g, '').trim()
-            setCurrentThought(statusText)
-            setStatusMessage(accumulatedMessage)
-            // Append to thinking content for the collapsible panel
-            accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n${statusText}` : statusText
-            setThinkingContent(accumulatedThinking)
-
-            // Complete thinking step and add appropriate step
-            if (thinkingStepId && agentSteps.find(s => s.id === thinkingStepId)?.status === 'active') {
+      // Check if this is a multi-source query
+      if (datasource.id === 'all_sources') {
+        // Use agent API for multi-source queries
+        await agentApi.queryStream(
+          {
+            query: messageText,
+            session_id: sessionId || undefined,
+            include_plan: true,
+          },
+          {
+            onStarted: (newSessionId) => {
+              setSessionId(newSessionId)
+            },
+            onPlanning: () => {
+              setCurrentThought('Analyzing which sources to query...')
+              accumulatedThinking = 'Planning multi-source query...'
+              setThinkingContent(accumulatedThinking)
+            },
+            onPlanComplete: (sources, reasoning) => {
               completeAgentStep(thinkingStepId, performance.now() - startTime)
-            }
+              accumulatedThinking += `\nWill query: ${sources.join(', ')}\n${reasoning}`
+              setThinkingContent(accumulatedThinking)
 
-            // Detect tool calls from status messages
-            if (chunk.includes('Querying') || chunk.includes('query')) {
+              // Add a step for the plan
+              addAgentStep({
+                type: 'planning',
+                title: `Querying ${sources.length} sources`,
+                description: sources.join(', '),
+              })
+            },
+            onSourceStart: (source) => {
+              setCurrentThought(`Querying ${source}...`)
               addAgentStep({
                 type: 'tool_call',
-                title: `Querying ${datasource.name}`,
-                description: statusText,
-                details: { datasource: datasource.id },
+                title: `Querying ${source}`,
+                description: `Fetching data from ${source}`,
+                details: { datasource: source },
               })
-            } else if (chunk.includes('Found') || chunk.includes('found')) {
-              addAgentStep({
-                type: 'analyzing',
-                title: 'Processing results',
-                description: statusText,
+            },
+            onSourceComplete: (source, success, error) => {
+              // Update the step for this source
+              setAgentSteps(prev => {
+                const sourceStep = prev.find(s => s.details?.datasource === source && s.status === 'active')
+                if (sourceStep) {
+                  return prev.map(s =>
+                    s.id === sourceStep.id
+                      ? { ...s, status: success ? 'complete' as const : 'error' as const, description: error || `Got results from ${source}` }
+                      : s
+                  )
+                }
+                return prev
               })
-            }
-          } else {
-            // Real content is starting
-            if (!hasRealContent) {
-              hasRealContent = true
+              accumulatedThinking += `\n${success ? '✓' : '✗'} ${source}: ${error || 'success'}`
+              setThinkingContent(accumulatedThinking)
+            },
+            onSynthesizing: () => {
+              setCurrentThought('Synthesizing results...')
               setIsThinking(false)
-              setStatusMessage('')
-              setCurrentThought(undefined)
+              hasRealContent = true
+              addAgentStep({
+                type: 'synthesizing',
+                title: 'Synthesizing response',
+                description: 'Combining results from all sources...',
+              })
+            },
+            onSynthesisChunk: (chunk) => {
+              accumulatedMessage += chunk
+              setStreamingMessage(accumulatedMessage)
+            },
+            onDone: (result) => {
+              const endTime = performance.now()
+              const responseTime = endTime - startTime
 
-              // Complete any active steps
+              // Create sources from successful sources
+              const sources: SourceReference[] = result.successful_sources.map(s => ({
+                type: 'datasource' as const,
+                name: s,
+              }))
+
+              // Complete all steps
+              setAgentSteps(prev => {
+                const updated = prev.map(s =>
+                  s.status === 'active'
+                    ? { ...s, status: 'complete' as const, duration: responseTime }
+                    : s
+                )
+                return [...updated, {
+                  id: `step-${++stepCounter.current}`,
+                  type: 'complete' as const,
+                  title: 'Response ready',
+                  description: `Queried ${result.successful_sources.length} sources in ${(responseTime / 1000).toFixed(1)}s`,
+                  status: 'complete' as const,
+                  timestamp: Date.now(),
+                  duration: responseTime,
+                }]
+              })
+
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: accumulatedMessage,
+                  timestamp: new Date().toISOString(),
+                  responseTime,
+                  sources,
+                  thinkingContent: accumulatedThinking || undefined,
+                },
+              ])
+              setStreamingMessage('')
+              setStatusMessage('')
+              setIsThinking(false)
+              setIsStreaming(false)
+              setCurrentThought(undefined)
+            },
+            onError: (error) => {
               setAgentSteps(prev => prev.map(s =>
                 s.status === 'active'
-                  ? { ...s, status: 'complete' as const, duration: performance.now() - startTime }
+                  ? { ...s, status: 'error' as const, description: error }
                   : s
               ))
 
-              // Add synthesizing step
-              addAgentStep({
-                type: 'synthesizing',
-                title: 'Generating response',
-                description: 'Composing the answer...',
-              })
-            }
-            setStreamingMessage(accumulatedMessage)
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: `Error: ${error}. Please try again.`,
+                  timestamp: new Date().toISOString(),
+                },
+              ])
+              setStreamingMessage('')
+              setStatusMessage('')
+              setIsThinking(false)
+              setIsStreaming(false)
+              setCurrentThought(undefined)
+            },
           }
-        },
-        // onSession
-        (newSessionId) => {
-          setSessionId(newSessionId)
-        },
-        // onDone
-        (metadata) => {
-          // Calculate response time
-          const endTime = performance.now()
-          const responseTime = endTime - startTime
+        )
+      } else {
+        // Single-source query - use regular chat API
+        await chatApi.sendMessageStream(
+          {
+            message: messageText,
+            datasource: datasource.id,
+            session_id: sessionId || undefined,
+          },
+          // onChunk
+          (chunk) => {
+            accumulatedMessage += chunk
 
-          // Store sources and follow-up questions from metadata
-          const sources = metadata?.sources || []
-          const followUps = metadata?.followUpQuestions || []
-          setCurrentSources(sources)
-          setFollowUpQuestions(followUps)
+            // Detect status updates from the chunk
+            const isStatusUpdate = /^[🎫🪣🗄️📊✓⚡📋🔄🧠]\s*\*?.+\*?\.{3}/.test(chunk) ||
+                                   chunk.includes('✓ Found') ||
+                                   chunk.includes('Querying') ||
+                                   chunk.includes('Searching') ||
+                                   chunk.includes('Fetching') ||
+                                   chunk.includes('Analyzing') ||
+                                   chunk.includes('Loading')
 
-          // Complete all steps
-          setAgentSteps(prev => {
-            const updated = prev.map(s =>
-              s.status === 'active'
-                ? { ...s, status: 'complete' as const, duration: responseTime }
-                : s
-            )
-            // Add completion step
-            return [...updated, {
-              id: `step-${++stepCounter.current}`,
-              type: 'complete' as const,
-              title: 'Response ready',
-              description: `Completed in ${responseTime < 1000 ? `${Math.round(responseTime)}ms` : `${(responseTime / 1000).toFixed(1)}s`}`,
-              status: 'complete' as const,
-              timestamp: Date.now(),
-              duration: responseTime,
-            }]
-          })
+            if (isStatusUpdate && !hasRealContent) {
+              // Update agent panel with detected activity
+              const statusText = chunk.replace(/[*_]/g, '').trim()
+              setCurrentThought(statusText)
+              setStatusMessage(accumulatedMessage)
+              // Append to thinking content for the collapsible panel
+              accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n${statusText}` : statusText
+              setThinkingContent(accumulatedThinking)
 
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              content: accumulatedMessage,
-              timestamp: new Date().toISOString(),
-              responseTime,
-              sources,
-              followUpQuestions: followUps,
-              thinkingContent: accumulatedThinking || undefined,
-            },
-          ])
-          setStreamingMessage('')
-          setStatusMessage('')
-          setIsThinking(false)
-          setIsStreaming(false)
-          setCurrentThought(undefined)
-        },
-        // onError
-        (error) => {
-          // Mark current step as error
-          setAgentSteps(prev => prev.map(s =>
-            s.status === 'active'
-              ? { ...s, status: 'error' as const, description: error }
-              : s
-          ))
+              // Complete thinking step and add appropriate step
+              if (thinkingStepId && agentSteps.find(s => s.id === thinkingStepId)?.status === 'active') {
+                completeAgentStep(thinkingStepId, performance.now() - startTime)
+              }
 
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              content: `Error: ${error}. Please try again.`,
-              timestamp: new Date().toISOString(),
-            },
-          ])
-          setStreamingMessage('')
-          setStatusMessage('')
-          setIsThinking(false)
-          setIsStreaming(false)
-          setCurrentThought(undefined)
-        },
-        // onAgentStep (from backend)
-        (step) => {
-          // Handle backend-provided agent steps
-          setAgentSteps(prev => {
-            const existingIndex = prev.findIndex(s => s.id === step.id)
-            if (existingIndex >= 0) {
-              // Update existing step
-              const updated = [...prev]
-              updated[existingIndex] = { ...updated[existingIndex], ...step }
-              return updated
+              // Detect tool calls from status messages
+              if (chunk.includes('Querying') || chunk.includes('query')) {
+                addAgentStep({
+                  type: 'tool_call',
+                  title: `Querying ${datasource.name}`,
+                  description: statusText,
+                  details: { datasource: datasource.id },
+                })
+              } else if (chunk.includes('Found') || chunk.includes('found')) {
+                addAgentStep({
+                  type: 'analyzing',
+                  title: 'Processing results',
+                  description: statusText,
+                })
+              }
+            } else {
+              // Real content is starting
+              if (!hasRealContent) {
+                hasRealContent = true
+                setIsThinking(false)
+                setStatusMessage('')
+                setCurrentThought(undefined)
+
+                // Complete any active steps
+                setAgentSteps(prev => prev.map(s =>
+                  s.status === 'active'
+                    ? { ...s, status: 'complete' as const, duration: performance.now() - startTime }
+                    : s
+                ))
+
+                // Add synthesizing step
+                addAgentStep({
+                  type: 'synthesizing',
+                  title: 'Generating response',
+                  description: 'Composing the answer...',
+                })
+              }
+              setStreamingMessage(accumulatedMessage)
             }
-            // Add new step
-            return [...prev, step]
-          })
-        },
-        // onSource (not used currently)
-        undefined,
-        // onThinking - handle streaming thinking content from Claude
-        (thinkingText) => {
-          accumulatedThinking += thinkingText
-          setThinkingContent(accumulatedThinking)
-        },
-        // onThinkingStart - Claude started thinking
-        () => {
-          setIsActivelyThinking(true)
-          setThinkingContent('')
-          accumulatedThinking = ''
-        },
-        // onThinkingEnd - Claude finished thinking
-        () => {
-          setIsActivelyThinking(false)
-        }
-      )
+          },
+          // onSession
+          (newSessionId) => {
+            setSessionId(newSessionId)
+          },
+          // onDone
+          (metadata) => {
+            // Calculate response time
+            const endTime = performance.now()
+            const responseTime = endTime - startTime
+
+            // Store sources and follow-up questions from metadata
+            const sources = metadata?.sources || []
+            const followUps = metadata?.followUpQuestions || []
+            setCurrentSources(sources)
+            setFollowUpQuestions(followUps)
+
+            // Complete all steps
+            setAgentSteps(prev => {
+              const updated = prev.map(s =>
+                s.status === 'active'
+                  ? { ...s, status: 'complete' as const, duration: responseTime }
+                  : s
+              )
+              // Add completion step
+              return [...updated, {
+                id: `step-${++stepCounter.current}`,
+                type: 'complete' as const,
+                title: 'Response ready',
+                description: `Completed in ${responseTime < 1000 ? `${Math.round(responseTime)}ms` : `${(responseTime / 1000).toFixed(1)}s`}`,
+                status: 'complete' as const,
+                timestamp: Date.now(),
+                duration: responseTime,
+              }]
+            })
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: accumulatedMessage,
+                timestamp: new Date().toISOString(),
+                responseTime,
+                sources,
+                followUpQuestions: followUps,
+                thinkingContent: accumulatedThinking || undefined,
+              },
+            ])
+            setStreamingMessage('')
+            setStatusMessage('')
+            setIsThinking(false)
+            setIsStreaming(false)
+            setCurrentThought(undefined)
+          },
+          // onError
+          (error) => {
+            // Mark current step as error
+            setAgentSteps(prev => prev.map(s =>
+              s.status === 'active'
+                ? { ...s, status: 'error' as const, description: error }
+                : s
+            ))
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: `Error: ${error}. Please try again.`,
+                timestamp: new Date().toISOString(),
+              },
+            ])
+            setStreamingMessage('')
+            setStatusMessage('')
+            setIsThinking(false)
+            setIsStreaming(false)
+            setCurrentThought(undefined)
+          },
+          // onAgentStep (from backend)
+          (step) => {
+            // Handle backend-provided agent steps
+            setAgentSteps(prev => {
+              const existingIndex = prev.findIndex(s => s.id === step.id)
+              if (existingIndex >= 0) {
+                // Update existing step
+                const updated = [...prev]
+                updated[existingIndex] = { ...updated[existingIndex], ...step }
+                return updated
+              }
+              // Add new step
+              return [...prev, step]
+            })
+          },
+          // onSource (not used currently)
+          undefined,
+          // onThinking - handle streaming thinking content from Claude
+          (thinkingText) => {
+            accumulatedThinking += thinkingText
+            setThinkingContent(accumulatedThinking)
+          },
+          // onThinkingStart - Claude started thinking
+          () => {
+            setIsActivelyThinking(true)
+            setThinkingContent('')
+            accumulatedThinking = ''
+          },
+          // onThinkingEnd - Claude finished thinking
+          () => {
+            setIsActivelyThinking(false)
+          }
+        )
+      }
     } catch (error) {
       setAgentSteps(prev => [...prev, {
         id: `step-${++stepCounter.current}`,

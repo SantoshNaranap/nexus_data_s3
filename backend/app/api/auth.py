@@ -126,7 +126,7 @@ async def login(
     )
 
     if not user:
-        security_logger.log_auth_failure(request.email, {"reason": "invalid_credentials"})
+        security_logger.log_auth_failure("invalid_credentials", {"email": request.email})
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
