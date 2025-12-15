@@ -13,6 +13,7 @@ export interface ChatMessage {
   responseTime?: number; // Time in milliseconds
   sources?: SourceReference[]; // Perplexity-like source citations
   followUpQuestions?: string[]; // Suggested follow-up questions
+  thinkingContent?: string; // AI's thinking process (collapsible)
 }
 
 export interface SourceReference {

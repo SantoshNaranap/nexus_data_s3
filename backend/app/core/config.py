@@ -104,7 +104,8 @@ class Settings(BaseSettings):
     user_google_email: str = ""  # Optional: for single-user mode
 
     # Slack
-    slack_bot_token: str = ""
+    slack_bot_token: str = ""  # Bot token (xoxb-) for channels
+    slack_user_token: str = ""  # User token (xoxp-) for DMs - required for reading DMs
     slack_app_token: str = ""  # Optional: for Socket Mode
 
     # GitHub
@@ -117,9 +118,40 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+    log_format: str = "development"  # "development" for readable, "json" for structured
 
     # Encryption - will be auto-generated in development if not set
     encryption_key: str = ""
+
+    # Frontend URL - IMPORTANT: Configure this in production!
+    frontend_url: str = "http://localhost:5173"
+
+    # Security settings
+    cookie_secure: bool = False  # Set to True in production (requires HTTPS)
+    cookie_samesite: str = "lax"  # "strict" for production, "lax" for development
+
+    # Rate limiting
+    rate_limit_enabled: bool = True
+    rate_limit_requests_per_minute: int = 60
+    rate_limit_requests_per_hour: int = 1000
+
+    # Application version (for health checks)
+    version: str = "1.0.0"
+
+    @property
+    def cookie_settings(self) -> dict:
+        """Get cookie security settings based on environment."""
+        if self.is_production:
+            return {
+                "secure": True,
+                "samesite": "strict",
+                "httponly": True,
+            }
+        return {
+            "secure": self.cookie_secure,
+            "samesite": self.cookie_samesite,
+            "httponly": True,
+        }
 
     @field_validator("encryption_key", mode="before")
     @classmethod

@@ -4,7 +4,9 @@ import type { DataSource, ChatMessage, AgentStep, SourceReference } from '../typ
 import MarkdownMessage from './MarkdownMessage'
 import AgentActivityPanel from './AgentActivityPanel'
 import { SessionManager } from '../utils/sessionManager'
-import { DATA_SOURCE_ICONS } from '../constants'
+import DataSourceIcon from './DataSourceIcon'
+import ThinkingIndicator, { ThinkingIndicatorStreaming } from './ThinkingIndicator'
+import { useWittyMessages } from '../hooks/useWittyMessages'
 
 interface ChatInterfaceProps {
   datasource: DataSource
@@ -21,9 +23,18 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([])
   const [showAgentPanel, setShowAgentPanel] = useState(true)
   const [currentThought, setCurrentThought] = useState<string | undefined>()
-  const [_currentSources, setCurrentSources] = useState<SourceReference[]>([])
-  const [_followUpQuestions, setFollowUpQuestions] = useState<string[]>([])
+  const [currentSources, setCurrentSources] = useState<SourceReference[]>([])
+  const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([])
+  const [thinkingContent, setThinkingContent] = useState<string>('')
+  const [thinkingExpanded, setThinkingExpanded] = useState(true)
+  const [isActivelyThinking, setIsActivelyThinking] = useState(false)
+  const [streamingElapsed, setStreamingElapsed] = useState(0)
+  const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Witty rotating messages during loading
+  const connectingMessage = useWittyMessages(isStreaming && !thinkingContent && !streamingMessage, 'connecting', 2000)
+  const processingMessage = useWittyMessages(isStreaming, 'thinking', 2500)
 
   // Step counter for unique IDs
   const stepCounter = useRef(0)
@@ -87,6 +98,17 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     setInput(question)
   }
 
+  // Copy message to clipboard
+  const handleCopyMessage = async (content: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedMessageIndex(index)
+      setTimeout(() => setCopiedMessageIndex(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
@@ -108,12 +130,16 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     setAgentSteps([])
     setCurrentSources([])
     setFollowUpQuestions([])
+    setThinkingContent('')
+    setThinkingExpanded(true)
+    setIsActivelyThinking(false)
     stepCounter.current = 0
 
     // Track start time for response timing
     const startTime = performance.now()
     let accumulatedMessage = ''
     let hasRealContent = false
+    let accumulatedThinking = '' // Track thinking content for saving with message
 
     // Add initial thinking step
     const thinkingStepId = addAgentStep({
@@ -147,6 +173,9 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
             const statusText = chunk.replace(/[*_]/g, '').trim()
             setCurrentThought(statusText)
             setStatusMessage(accumulatedMessage)
+            // Append to thinking content for the collapsible panel
+            accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n${statusText}` : statusText
+            setThinkingContent(accumulatedThinking)
 
             // Complete thinking step and add appropriate step
             if (thinkingStepId && agentSteps.find(s => s.id === thinkingStepId)?.status === 'active') {
@@ -237,6 +266,7 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
               responseTime,
               sources,
               followUpQuestions: followUps,
+              thinkingContent: accumulatedThinking || undefined,
             },
           ])
           setStreamingMessage('')
@@ -282,6 +312,23 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
             // Add new step
             return [...prev, step]
           })
+        },
+        // onSource (not used currently)
+        undefined,
+        // onThinking - handle streaming thinking content from Claude
+        (thinkingText) => {
+          accumulatedThinking += thinkingText
+          setThinkingContent(accumulatedThinking)
+        },
+        // onThinkingStart - Claude started thinking
+        () => {
+          setIsActivelyThinking(true)
+          setThinkingContent('')
+          accumulatedThinking = ''
+        },
+        // onThinkingEnd - Claude finished thinking
+        () => {
+          setIsActivelyThinking(false)
         }
       )
     } catch (error) {
@@ -318,9 +365,7 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
         <div className="flex-shrink-0 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-6 py-4 transition-colors duration-200">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="text-2xl">
-                {DATA_SOURCE_ICONS[datasource.id] || '📊'}
-              </div>
+              <DataSourceIcon datasourceId={datasource.id} size={32} className="text-gray-700 dark:text-gray-300" />
               <div>
                 <h2 className="font-medium text-gray-900 dark:text-white">{datasource.name}</h2>
                 <p className="text-xs text-gray-500 dark:text-gray-400">{datasource.description}</p>
@@ -442,6 +487,10 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
                   </div>
                 ) : (
                   <>
+                    {/* Thinking indicator - collapsible, shown above response */}
+                    {message.thinkingContent && (
+                      <ThinkingIndicator content={message.thinkingContent} />
+                    )}
                     <MarkdownMessage content={message.content} />
 
                     {/* Sources - Perplexity style */}
@@ -518,39 +567,76 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
                         </span>
                       </>
                     )}
+                    {/* Copy button for assistant messages */}
+                    {message.role === 'assistant' && !message.content.startsWith('Error:') && (
+                      <>
+                        <span>•</span>
+                        <button
+                          onClick={() => handleCopyMessage(message.content, index)}
+                          className="flex items-center gap-1 hover:opacity-100 opacity-70 transition-opacity"
+                          title="Copy to clipboard"
+                        >
+                          {copiedMessageIndex === index ? (
+                            <>
+                              <svg className="w-3.5 h-3.5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                              <span className="text-green-600 dark:text-green-400">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                              </svg>
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
             </div>
           ))}
 
-          {streamingMessage && (
-            <div className="flex justify-start">
-              <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-2xl px-5 py-4 max-w-3xl border border-gray-200 dark:border-gray-700 transition-colors duration-200">
-                <div className="relative">
-                  <MarkdownMessage content={streamingMessage} />
-                  <span className="inline-block w-0.5 h-4 bg-blue-600 dark:bg-blue-400 ml-1 animate-pulse align-middle"></span>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Show thinking state - visible during streaming phase */}
-          {isStreaming && !streamingMessage && (
+          {isStreaming && (
             <div className="flex justify-start">
-              <div className="bg-white dark:bg-gray-800 rounded-2xl px-5 py-3 border border-gray-200 dark:border-gray-700 transition-colors duration-200">
-                {statusMessage ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-300">
-                    <MarkdownMessage content={statusMessage} />
-                  </div>
-                ) : (
-                  <div className="flex items-center space-x-2">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+              <div className="max-w-3xl w-full">
+                {/* Show thinking indicator when we have thinking content OR when actively thinking */}
+                {(thinkingContent || isActivelyThinking) && !streamingMessage && (
+                  <ThinkingIndicatorStreaming
+                    content={thinkingContent}
+                    isActive={isActivelyThinking}
+                  />
+                )}
+                {/* Show streaming message if we have one */}
+                {streamingMessage && (
+                  <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-2xl px-5 py-4 border border-gray-200 dark:border-gray-700 transition-colors duration-200">
+                    {/* Show collapsed thinking above the response */}
+                    {thinkingContent && (
+                      <ThinkingIndicator content={thinkingContent} />
+                    )}
+                    <div className="relative">
+                      <MarkdownMessage content={streamingMessage} />
+                      <span className="inline-block w-0.5 h-4 bg-blue-600 dark:bg-blue-400 ml-1 animate-pulse align-middle"></span>
                     </div>
-                    <span className="text-sm text-gray-500 dark:text-gray-400">Thinking...</span>
+                  </div>
+                )}
+                {/* Initial loading state before any content */}
+                {!thinkingContent && !isActivelyThinking && !streamingMessage && (
+                  <div className="bg-white dark:bg-gray-800 rounded-2xl px-5 py-3 border border-gray-200 dark:border-gray-700 transition-colors duration-200">
+                    <div className="flex items-center space-x-3">
+                      <div className="flex space-x-1">
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" />
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                      </div>
+                      <span className="text-sm text-gray-500 dark:text-gray-400 transition-all duration-300">
+                        {connectingMessage}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -592,7 +678,9 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 text-center">
               {isStreaming ? (
-                <span className="text-blue-600 dark:text-blue-400">Processing your request...</span>
+                <span className="text-blue-600 dark:text-blue-400 transition-all duration-300">
+                  {processingMessage}
+                </span>
               ) : (
                 'Press Enter to send'
               )}

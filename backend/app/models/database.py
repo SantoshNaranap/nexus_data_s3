@@ -10,14 +10,14 @@ Base = declarative_base()
 
 
 class User(Base):
-    """User model for authentication (Google OAuth)."""
+    """User model for authentication (email/password)."""
 
     __tablename__ = "users"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
     name = Column(String(255), nullable=True)
-    google_id = Column(String(255), unique=True, nullable=False, index=True)
     profile_picture = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
@@ -28,7 +28,6 @@ class User(Base):
             "id": self.id,
             "email": self.email,
             "name": self.name,
-            "google_id": self.google_id,
             "profile_picture": self.profile_picture,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

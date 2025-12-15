@@ -9,21 +9,60 @@ Uses the Slack Web API via slack_sdk.
 import json
 import logging
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
+# Thread pool for parallel Slack API calls (Slack SDK is synchronous)
+_executor = ThreadPoolExecutor(max_workers=20)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("slack-mcp-server")
 
-# Initialize Slack client
-slack_token = os.getenv("SLACK_BOT_TOKEN", "")
-slack_client = WebClient(token=slack_token)
+# Initialize Slack clients
+# Bot token (xoxb-) - for channels, sending messages, listing users
+bot_token = os.getenv("SLACK_BOT_TOKEN", "")
+# User token (xoxp-) - for DMs, search, private content (optional but recommended)
+user_token = os.getenv("SLACK_USER_TOKEN", "")
+
+# Create clients - bot_client is required, user_client is optional
+bot_client = WebClient(token=bot_token) if bot_token else None
+user_client = WebClient(token=user_token) if user_token else None
+
+# Default client for backward compatibility
+slack_client = bot_client or user_client
+
+def _get_client_for_operation(operation_type: str = "default") -> WebClient:
+    """Get the appropriate client for the operation type.
+
+    - 'dm': Uses user_client if available (required for reading DMs between users)
+    - 'search': Uses user_client if available (better search results)
+    - 'default': Uses bot_client, falls back to user_client
+    """
+    if operation_type in ("dm", "search"):
+        # Prefer user token for DMs and search
+        if user_client:
+            return user_client
+        elif bot_client:
+            logger.warning(f"User token not available for {operation_type} operation. Using bot token (limited access).")
+            return bot_client
+        else:
+            raise ValueError("No Slack token configured")
+    else:
+        # Default: prefer bot token
+        if bot_client:
+            return bot_client
+        elif user_client:
+            return user_client
+        else:
+            raise ValueError("No Slack token configured")
 
 # Create MCP server
 app = Server("slack-connector")
@@ -31,29 +70,147 @@ app = Server("slack-connector")
 # Cache for channel/user lookups
 _channel_cache: dict = {}
 _user_cache: dict = {}
+_user_info_cache: dict = {}  # user_id -> {name, real_name} for fast lookups
+_users_loaded: bool = False
+
+
+def _preload_all_users() -> None:
+    """Pre-load all users into cache for fast lookups. Call this once before bulk operations."""
+    global _users_loaded, _user_info_cache
+
+    if _users_loaded and _user_info_cache:
+        return  # Already loaded
+
+    try:
+        result = slack_client.users_list(limit=1000)
+        for user in result.get("members", []):
+            if user.get("deleted") or user.get("is_bot"):
+                continue
+
+            user_id = user["id"]
+            real_name = user.get("real_name", "")
+            username = user.get("name", "")
+            email = user.get("profile", {}).get("email", "")
+            display_name = user.get("profile", {}).get("display_name", "")
+
+            _user_info_cache[user_id] = {
+                "name": username,
+                "real_name": real_name or username or user_id,
+                "display_name": display_name,
+                "email": email,
+            }
+
+            # Cache all lookup variations for _get_user_id
+            if username:
+                _user_cache[username] = user_id
+                _user_cache[username.lower()] = user_id
+            if email:
+                _user_cache[email] = user_id
+                _user_cache[email.lower()] = user_id
+            if real_name:
+                _user_cache[real_name.lower()] = user_id
+                # Also cache first and last names for partial matching
+                name_parts = real_name.lower().split()
+                if name_parts:
+                    # Cache first name -> user_id (may overwrite, that's ok for common names)
+                    _user_cache[f"first:{name_parts[0]}"] = user_id
+                    if len(name_parts) > 1:
+                        # Cache last name -> user_id
+                        _user_cache[f"last:{name_parts[-1]}"] = user_id
+            if display_name:
+                _user_cache[display_name.lower()] = user_id
+
+        _users_loaded = True
+        logger.info(f"Pre-loaded {len(_user_info_cache)} users into cache")
+    except SlackApiError as e:
+        logger.warning(f"Failed to preload users: {e}")
+
+
+def _get_user_name_fast(user_id: str) -> str:
+    """Get user display name from cache (no API call). Falls back to user_id if not cached."""
+    if not user_id:
+        return "Unknown"
+
+    # Check info cache first (populated by _preload_all_users)
+    if user_id in _user_info_cache:
+        info = _user_info_cache[user_id]
+        return info.get("real_name") or info.get("name") or user_id
+
+    # If not in cache and users weren't loaded, try to load them
+    if not _users_loaded:
+        _preload_all_users()
+        if user_id in _user_info_cache:
+            info = _user_info_cache[user_id]
+            return info.get("real_name") or info.get("name") or user_id
+
+    # Fallback: return user_id (don't make API call for speed)
+    return user_id
 
 
 def _get_channel_id(channel_name: str) -> Optional[str]:
-    """Get channel ID from name, with caching."""
-    if channel_name.startswith("C") or channel_name.startswith("D"):
+    """Get channel ID from name, with caching and fuzzy matching. Uses user token to access private channels."""
+    if channel_name.startswith("C") or channel_name.startswith("D") or channel_name.startswith("G"):
         return channel_name  # Already an ID
 
     # Remove # prefix if present
     channel_name = channel_name.lstrip("#")
 
-    # Check cache
+    # Normalize for matching: lowercase, replace spaces with dashes
+    search_name = channel_name.lower().replace(" ", "-").replace("_", "-")
+
+    # Check cache first (exact match)
     if channel_name in _channel_cache:
         return _channel_cache[channel_name]
+    if search_name in _channel_cache:
+        return _channel_cache[search_name]
+
+    # Use user token to get private channels the user is a member of
+    client = _get_client_for_operation("dm")
 
     try:
-        # Search in public channels
-        result = slack_client.conversations_list(types="public_channel,private_channel")
-        for channel in result["channels"]:
-            _channel_cache[channel["name"]] = channel["id"]
-            if channel["name"] == channel_name:
-                return channel["id"]
+        # First try users_conversations which includes private channels user is in
+        result = client.users_conversations(types="public_channel,private_channel", limit=500, exclude_archived=False)
+        channels = result["channels"]
     except SlackApiError as e:
-        logger.error(f"Error looking up channel: {e}")
+        logger.warning(f"users_conversations failed: {e}, falling back to conversations_list")
+        try:
+            result = client.conversations_list(types="public_channel,private_channel")
+            channels = result["channels"]
+        except SlackApiError as e2:
+            logger.error(f"Error looking up channel: {e2}")
+            return None
+
+    # Build cache and look for matches
+    exact_match = None
+    fuzzy_matches = []
+
+    for channel in channels:
+        ch_name = channel["name"]
+        ch_name_lower = ch_name.lower()
+        _channel_cache[ch_name] = channel["id"]
+        _channel_cache[ch_name_lower] = channel["id"]
+
+        # Exact match
+        if ch_name == channel_name or ch_name_lower == search_name:
+            exact_match = channel["id"]
+            continue
+
+        # Fuzzy match: check if search term is contained in channel name
+        # or if channel name contains all the key parts of search
+        search_parts = search_name.replace("-", " ").split()
+        if all(part in ch_name_lower for part in search_parts):
+            fuzzy_matches.append((channel["id"], ch_name))
+        elif search_name in ch_name_lower:
+            fuzzy_matches.insert(0, (channel["id"], ch_name))  # Higher priority
+
+    if exact_match:
+        return exact_match
+
+    if fuzzy_matches:
+        # Return best fuzzy match
+        best_id, best_name = fuzzy_matches[0]
+        logger.info(f"Fuzzy matched '{channel_name}' to '#{best_name}'")
+        return best_id
 
     return None
 
@@ -83,9 +240,27 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
         return _user_cache[user_identifier]
     if search_lower in _user_cache:
         return _user_cache[search_lower]
+    # Check cached first/last name matches
+    if f"first:{search_lower}" in _user_cache:
+        return _user_cache[f"first:{search_lower}"]
+    if f"last:{search_lower}" in _user_cache:
+        return _user_cache[f"last:{search_lower}"]
 
     try:
-        result = slack_client.users_list()
+        # Retry with backoff for rate limiting
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = slack_client.users_list()
+                break
+            except SlackApiError as e:
+                if 'ratelimited' in str(e) and attempt < max_retries - 1:
+                    wait_time = int(e.response.headers.get('Retry-After', 2))
+                    logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    raise
 
         # First pass: look for exact matches and build cache
         exact_match = None
@@ -131,17 +306,23 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
 
             # Check if search term matches first or last name
             name_parts = real_name_lower.split()
-            if search_lower in name_parts:
-                # First or last name exact match - high confidence
-                partial_matches.insert(0, (user_id, real_name, email, "name_part"))
-            elif search_lower in real_name_lower:
-                # Partial match in real name
+
+            # Priority 1: First name exact match (highest confidence - "Akash" -> "Akash Anand")
+            if name_parts and name_parts[0] == search_lower:
+                partial_matches.insert(0, (user_id, real_name, email, "first_name"))
+            # Priority 2: Last name exact match
+            elif name_parts and len(name_parts) > 1 and name_parts[-1] == search_lower:
+                partial_matches.append((user_id, real_name, email, "last_name"))
+            # Priority 3: Any name part exact match (middle names)
+            elif search_lower in name_parts:
+                partial_matches.append((user_id, real_name, email, "name_part"))
+            # Priority 4: Partial/substring match - LOWER priority (avoids "Akash" matching "Omprakash")
+            # Only include if the search term is at word boundary
+            elif real_name_lower.startswith(search_lower + " ") or (" " + search_lower) in real_name_lower:
                 partial_matches.append((user_id, real_name, email, "partial"))
-            elif search_lower in display_name_lower:
-                # Partial match in display name
+            elif display_name_lower.startswith(search_lower) or display_name_lower == search_lower:
                 partial_matches.append((user_id, display_name, email, "display"))
-            elif search_lower in username.lower():
-                # Partial match in username
+            elif username.lower().startswith(search_lower):
                 partial_matches.append((user_id, username, email, "username"))
 
         # Return exact match if found
@@ -154,6 +335,13 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             if len(partial_matches) == 1:
                 best_match = partial_matches[0]
                 logger.info(f"Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+                return best_match[0]
+
+            # Check if there's a clear first_name match - prefer that over ambiguity
+            first_name_matches = [m for m in partial_matches if m[3] == "first_name"]
+            if len(first_name_matches) == 1:
+                best_match = first_name_matches[0]
+                logger.info(f"First name matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
                 return best_match[0]
 
             # Multiple matches - return special ambiguous marker
@@ -610,6 +798,46 @@ Returns message count, active users, and key discussion topics.""",
                 "required": ["channel"],
             },
         ),
+        Tool(
+            name="get_all_recent_messages",
+            description="""Get ALL your recent messages across ALL DMs and channels.
+
+USE THIS TOOL WHEN:
+- User asks "what messages did I get yesterday?"
+- User asks "summarize my Slack messages"
+- User asks "what did I miss?" or "catch me up"
+- User wants a comprehensive view of recent activity
+- User asks about messages from a specific time period
+
+This is the PRIMARY tool for getting a comprehensive view of recent Slack activity.
+Returns messages from all DMs and channels the user is part of, sorted by time.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hours_ago": {
+                        "type": "integer",
+                        "description": "Get messages from the last N hours (default: 24)",
+                        "default": 24,
+                    },
+                    "include_channels": {
+                        "type": "boolean",
+                        "description": "Include channel messages (default: true)",
+                        "default": True,
+                    },
+                    "include_dms": {
+                        "type": "boolean",
+                        "description": "Include DM messages (default: true)",
+                        "default": True,
+                    },
+                    "max_messages_per_conversation": {
+                        "type": "integer",
+                        "description": "Max messages per DM/channel (default: 20)",
+                        "default": 20,
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -652,6 +880,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return await handle_search_in_dms(arguments)
         elif name == "get_channel_activity":
             return await handle_get_channel_activity(arguments)
+        elif name == "get_all_recent_messages":
+            return await handle_get_all_recent_messages(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except SlackApiError as e:
@@ -665,7 +895,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # ==================== Channel Handlers ====================
 
 async def handle_list_channels(arguments: dict) -> list[TextContent]:
-    """List all channels."""
+    """List all channels including private ones the user is a member of."""
     include_private = arguments.get("include_private", True)
     limit = arguments.get("limit", 100)
 
@@ -673,7 +903,16 @@ async def handle_list_channels(arguments: dict) -> list[TextContent]:
     if include_private:
         types += ",private_channel"
 
-    result = slack_client.conversations_list(types=types, limit=limit)
+    # Use user token with users_conversations to get private channels
+    # This returns channels the user is a member of (including private)
+    client = _get_client_for_operation("dm")  # user token preferred
+
+    try:
+        # users_conversations gets channels the authenticated user is in
+        result = client.users_conversations(types=types, limit=limit, exclude_archived=False)
+    except SlackApiError:
+        # Fallback to conversations_list if users_conversations fails
+        result = client.conversations_list(types=types, limit=limit)
 
     channels = []
     for channel in result["channels"]:
@@ -729,9 +968,22 @@ async def handle_read_messages(arguments: dict) -> list[TextContent]:
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return [TextContent(type="text", text=json.dumps({"error": f"Channel not found: {channel}"}))]
 
-    result = slack_client.conversations_history(channel=channel_id, limit=limit)
+    # Use user client which has access to channels user is member of
+    client = _get_client_for_operation("dm")
+
+    try:
+        result = client.conversations_history(channel=channel_id, limit=limit)
+    except SlackApiError as e:
+        # If user client fails, try bot client
+        if bot_client:
+            try:
+                result = bot_client.conversations_history(channel=channel_id, limit=limit)
+            except SlackApiError as e2:
+                return [TextContent(type="text", text=json.dumps({"error": f"Cannot read channel {channel}: {e2.response['error']}"}))]
+        else:
+            return [TextContent(type="text", text=json.dumps({"error": f"Cannot read channel {channel}: {e.response['error']}"}))]
 
     messages = []
     for msg in result["messages"]:
@@ -763,7 +1015,9 @@ async def handle_search_messages(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     limit = arguments.get("limit", 20)
 
-    result = slack_client.search_messages(query=query, count=limit)
+    # Use user client for search (better results)
+    client = _get_client_for_operation("search")
+    result = client.search_messages(query=query, count=limit)
 
     messages = []
     for match in result["messages"]["matches"]:
@@ -1043,6 +1297,19 @@ def _parse_date_filter(days_ago: Optional[int] = None, since_date: Optional[str]
     return None
 
 
+def _find_dm_channel_with_user(client: WebClient, target_user_id: str) -> Optional[str]:
+    """Find existing DM channel with a user by listing all DM conversations."""
+    try:
+        # List all DM conversations
+        dms = client.conversations_list(types="im,mpim", limit=200)
+        for dm in dms.get("channels", []):
+            if dm.get("user") == target_user_id:
+                return dm["id"]
+    except SlackApiError as e:
+        logger.warning(f"Error listing DMs: {e}")
+    return None
+
+
 async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     """Read DM conversation with a specific user."""
     user = arguments["user"]
@@ -1050,17 +1317,31 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     days_ago = arguments.get("days_ago")
     since_date = arguments.get("since_date")
 
+    # Use user client for DM operations (required for reading DMs between users)
+    client = _get_client_for_operation("dm")
+
     user_id_result = _get_user_id(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
     if error_msg:
-        return [TextContent(type="text", text=error_msg)]
+        # Return JSON error for consistency
+        error_response = {"error": error_msg, "query": user}
+        if is_ambiguous:
+            error_response["type"] = "ambiguous_user"
+        return [TextContent(type="text", text=json.dumps(error_response, indent=2))]
 
-    # Open/get DM channel with user
-    try:
-        dm_result = slack_client.conversations_open(users=[user_id])
-        dm_channel = dm_result["channel"]["id"]
-    except SlackApiError as e:
-        return [TextContent(type="text", text=f"Could not open DM with {user}: {e.response['error']}")]
+    # Find existing DM channel with user (doesn't require im:write scope)
+    dm_channel = _find_dm_channel_with_user(client, user_id)
+
+    if not dm_channel:
+        # Fallback: try conversations_open (requires im:write scope)
+        try:
+            dm_result = client.conversations_open(users=[user_id])
+            dm_channel = dm_result["channel"]["id"]
+        except SlackApiError as e:
+            user_name = _get_user_name(user_id)
+            if "missing_scope" in str(e):
+                return [TextContent(type="text", text=f"No existing DM conversation found with {user_name}. To start a new conversation, the User Token needs 'im:write' scope.")]
+            return [TextContent(type="text", text=f"Could not access DM with {user_name}: {e.response['error']}")]
 
     # Build history query
     kwargs = {"channel": dm_channel, "limit": limit}
@@ -1068,7 +1349,13 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     if oldest:
         kwargs["oldest"] = oldest
 
-    result = slack_client.conversations_history(**kwargs)
+    try:
+        result = client.conversations_history(**kwargs)
+    except SlackApiError as e:
+        error_hint = ""
+        if "missing_scope" in str(e):
+            error_hint = "\n\nHint: Reading DM history requires im:history scope on your User Token."
+        return [TextContent(type="text", text=f"Could not read DM history: {e.response['error']}{error_hint}")]
 
     messages = []
     for msg in result["messages"]:
@@ -1151,22 +1438,44 @@ async def handle_list_dms(arguments: dict) -> list[TextContent]:
     """List all DM conversations."""
     limit = arguments.get("limit", 50)
 
-    result = slack_client.conversations_list(types="im", limit=limit)
+    # Use user client for DM operations
+    client = _get_client_for_operation("dm")
+    result = client.conversations_list(types="im,mpim", limit=limit)
 
     dms = []
     for dm in result["channels"]:
+        is_mpim = dm.get("is_mpim", False)
+        is_im = dm.get("is_im", False)
         user_id = dm.get("user")
-        if user_id:
-            user_name = _get_user_name(user_id)
+
+        if is_mpim or (not is_im and not user_id):
+            # Group DM - get member names from channel name or members list
+            dm_name = dm.get("name", "")
+            # MPIM names are like "mpdm-user1--user2--user3-1"
+            member_names = dm.get("purpose", {}).get("value", dm_name)
             dms.append({
                 "channel_id": dm["id"],
-                "user_id": user_id,
-                "user_name": user_name,
+                "type": "group_dm",
+                "name": member_names or dm_name,
                 "is_open": dm.get("is_open", False),
+                "num_members": dm.get("num_members", 0),
             })
+        elif is_im or user_id:
+            # 1-on-1 DM - has is_im=True or has user field
+            if user_id:
+                user_name = _get_user_name(user_id)
+                dms.append({
+                    "channel_id": dm["id"],
+                    "type": "direct_dm",
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "is_open": dm.get("is_open", False),
+                })
 
     response = {
         "count": len(dms),
+        "direct_dms": [d for d in dms if d.get("type") == "direct_dm"],
+        "group_dms": [d for d in dms if d.get("type") == "group_dm"],
         "dms": dms,
     }
 
@@ -1178,9 +1487,12 @@ async def handle_search_in_dms(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     limit = arguments.get("limit", 30)
 
+    # Use user client for DM search
+    client = _get_client_for_operation("search")
+
     # Use Slack search with "is:dm" modifier to search only DMs
     search_query = f"{query} is:dm"
-    result = slack_client.search_messages(query=search_query, count=limit)
+    result = client.search_messages(query=search_query, count=limit)
 
     messages = []
     for match in result["messages"]["matches"]:
@@ -1254,6 +1566,207 @@ async def handle_get_channel_activity(arguments: dict) -> list[TextContent]:
             for m in messages[:5]
         ],
     }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
+    """Get all recent messages across DMs and channels - OPTIMIZED with parallel fetching."""
+    import time
+    start_time = time.time()
+
+    hours_ago = arguments.get("hours_ago", 24)
+    include_channels = arguments.get("include_channels", True)
+    include_dms = arguments.get("include_dms", True)
+    max_per_convo = arguments.get("max_messages_per_conversation", 20)
+
+    # Calculate time cutoff
+    cutoff_time = datetime.now() - timedelta(hours=hours_ago)
+    oldest_ts = str(cutoff_time.timestamp())
+
+    client = _get_client_for_operation("dm")
+    all_messages: List[Dict] = []
+    errors: List[str] = []
+    loop = asyncio.get_event_loop()
+
+    # Step 1: Pre-load all users into cache (single API call)
+    logger.info("Pre-loading user cache...")
+    await loop.run_in_executor(_executor, _preload_all_users)
+    logger.info(f"User cache loaded in {time.time() - start_time:.2f}s")
+
+    # Step 2: Get list of all conversations (DMs + channels) in parallel
+    dm_channels: List[Dict] = []
+    channels: List[Dict] = []
+
+    async def fetch_dm_list():
+        try:
+            result = await loop.run_in_executor(
+                _executor,
+                lambda: client.conversations_list(types="im,mpim", limit=200)
+            )
+            return result.get("channels", [])
+        except SlackApiError as e:
+            errors.append(f"Listing DMs: {e.response.get('error', str(e))}")
+            return []
+
+    async def fetch_channel_list():
+        try:
+            result = await loop.run_in_executor(
+                _executor,
+                lambda: client.users_conversations(
+                    types="public_channel,private_channel",
+                    limit=100,
+                    exclude_archived=True
+                )
+            )
+            return result.get("channels", [])
+        except SlackApiError as e:
+            errors.append(f"Listing channels: {e.response.get('error', str(e))}")
+            return []
+
+    # Fetch both lists in parallel
+    list_tasks = []
+    if include_dms:
+        list_tasks.append(fetch_dm_list())
+    if include_channels:
+        list_tasks.append(fetch_channel_list())
+
+    list_results = await asyncio.gather(*list_tasks)
+
+    if include_dms and len(list_results) > 0:
+        dm_channels = list_results[0]
+    if include_channels:
+        channels = list_results[-1] if include_dms else list_results[0]
+
+    logger.info(f"Found {len(dm_channels)} DMs and {len(channels)} channels to check")
+
+    # Step 3: Fetch messages from all conversations IN PARALLEL
+    # Use semaphore to limit concurrent requests (avoid rate limiting)
+    semaphore = asyncio.Semaphore(15)  # Max 15 concurrent API calls
+
+    async def fetch_dm_history(dm: Dict) -> List[Dict]:
+        """Fetch history for a single DM or group DM conversation."""
+        async with semaphore:
+            dm_id = dm["id"]
+            is_mpim = dm.get("is_mpim", False)
+
+            # Get conversation name
+            if is_mpim:
+                # Group DM - use name or purpose
+                convo_name = dm.get("purpose", {}).get("value") or dm.get("name", "Group DM")
+            else:
+                # 1-on-1 DM
+                user_id = dm.get("user", "")
+                convo_name = _get_user_name_fast(user_id)
+
+            try:
+                history = await loop.run_in_executor(
+                    _executor,
+                    lambda: client.conversations_history(
+                        channel=dm_id,
+                        oldest=oldest_ts,
+                        limit=max_per_convo
+                    )
+                )
+                messages = []
+                for msg in history.get("messages", []):
+                    sender_id = msg.get("user", "")
+                    messages.append({
+                        "type": "group_dm" if is_mpim else "dm",
+                        "conversation_with": convo_name,
+                        "from": _get_user_name_fast(sender_id),
+                        "text": msg.get("text", ""),
+                        "timestamp": msg["ts"],
+                        "time": _format_timestamp(msg["ts"]),
+                    })
+                return messages
+            except SlackApiError as e:
+                if "channel_not_found" not in str(e) and "not_in_channel" not in str(e):
+                    errors.append(f"DM with {convo_name}: {e.response.get('error', str(e))}")
+                return []
+            except Exception as e:
+                return []
+
+    async def fetch_channel_history(channel: Dict) -> List[Dict]:
+        """Fetch history for a single channel."""
+        async with semaphore:
+            ch_id = channel["id"]
+            ch_name = channel.get("name", "unknown")
+
+            try:
+                history = await loop.run_in_executor(
+                    _executor,
+                    lambda: client.conversations_history(
+                        channel=ch_id,
+                        oldest=oldest_ts,
+                        limit=max_per_convo
+                    )
+                )
+                messages = []
+                for msg in history.get("messages", []):
+                    sender_id = msg.get("user", "")
+                    messages.append({
+                        "type": "channel",
+                        "channel": f"#{ch_name}",
+                        "from": _get_user_name_fast(sender_id),
+                        "text": msg.get("text", "")[:500],
+                        "timestamp": msg["ts"],
+                        "time": _format_timestamp(msg["ts"]),
+                        "has_thread": msg.get("reply_count", 0) > 0,
+                    })
+                return messages
+            except SlackApiError as e:
+                if "channel_not_found" not in str(e) and "not_in_channel" not in str(e):
+                    errors.append(f"#{ch_name}: {e.response.get('error', str(e))}")
+                return []
+            except Exception as e:
+                return []
+
+    # Create all fetch tasks
+    fetch_tasks = []
+    if include_dms:
+        fetch_tasks.extend([fetch_dm_history(dm) for dm in dm_channels])
+    if include_channels:
+        fetch_tasks.extend([fetch_channel_history(ch) for ch in channels])
+
+    # Execute all fetches in parallel
+    logger.info(f"Fetching messages from {len(fetch_tasks)} conversations in parallel...")
+    fetch_start = time.time()
+    results = await asyncio.gather(*fetch_tasks)
+    logger.info(f"Parallel fetch completed in {time.time() - fetch_start:.2f}s")
+
+    # Flatten results
+    for msg_list in results:
+        all_messages.extend(msg_list)
+
+    # Sort all messages by timestamp (most recent first)
+    all_messages.sort(key=lambda x: float(x["timestamp"]), reverse=True)
+
+    # Group messages by type
+    dm_messages = [m for m in all_messages if m["type"] == "dm"]
+    group_dm_messages = [m for m in all_messages if m["type"] == "group_dm"]
+    channel_messages = [m for m in all_messages if m["type"] == "channel"]
+
+    total_time = time.time() - start_time
+    logger.info(f"Total time: {total_time:.2f}s for {len(all_messages)} messages from {len(fetch_tasks)} conversations")
+
+    # Build response
+    response = {
+        "time_period": f"Last {hours_ago} hours",
+        "conversations_checked": len(fetch_tasks),
+        "total_messages": len(all_messages),
+        "dm_messages_count": len(dm_messages),
+        "group_dm_messages_count": len(group_dm_messages),
+        "channel_messages_count": len(channel_messages),
+        "fetch_time_seconds": round(total_time, 2),
+        "dm_messages": dm_messages[:100],
+        "group_dm_messages": group_dm_messages[:50],
+        "channel_messages": channel_messages[:100],
+    }
+
+    if errors:
+        response["errors"] = errors[:10]
+        response["error_count"] = len(errors)
 
     return [TextContent(type="text", text=json.dumps(response, indent=2))]
 

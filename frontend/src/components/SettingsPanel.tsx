@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { DataSource } from '../types'
-import { DATA_SOURCE_ICONS } from '../constants'
 import { datasourceApi } from '../services/api'
+import DataSourceIcon from './DataSourceIcon'
 
 interface SettingsPanelProps {
   datasources: DataSource[]
@@ -72,14 +72,17 @@ const credentialInstructions: Record<string, { title: string; steps: string[] }>
     ],
   },
   slack: {
-    title: 'How to get Slack Bot Token',
+    title: 'How to get Slack Tokens',
     steps: [
       'Go to api.slack.com/apps and click "Create New App"',
       'Choose "From scratch" and select your workspace',
       'Go to OAuth & Permissions in the sidebar',
-      'Add required scopes (channels:read, chat:write, users:read, etc.)',
+      'Add Bot scopes: channels:read, channels:history, chat:write, users:read',
+      'Add User scopes: channels:read, channels:history, im:read, im:history, search:read',
       'Click "Install to Workspace" and authorize',
-      'Copy the "Bot User OAuth Token" (starts with xoxb-)',
+      'Copy "Bot User OAuth Token" (xoxb-) → Bot Token field',
+      'Copy "User OAuth Token" (xoxp-) → User Token field',
+      '⚠️ IMPORTANT: User Token is REQUIRED to access private channels!',
     ],
   },
 }
@@ -217,10 +220,17 @@ const credentialFields: Record<string, CredentialField[]> = {
   slack: [
     {
       name: 'slack_bot_token',
-      label: 'Bot Token',
+      label: 'Bot Token (xoxb-)',
       type: 'password',
       placeholder: 'xoxb-...',
       required: true,
+    },
+    {
+      name: 'slack_user_token',
+      label: 'User Token (xoxp-) - Required for Private Channels & DMs',
+      type: 'password',
+      placeholder: 'xoxp-...',
+      required: false,
     },
     {
       name: 'slack_app_token',
@@ -388,7 +398,7 @@ export default function SettingsPanel({
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
-                    <span className="text-xl">{DATA_SOURCE_ICONS[datasource.id] || '📊'}</span>
+                    <DataSourceIcon datasourceId={datasource.id} size={24} />
                     <span className={`text-sm font-medium ${
                       selectedDatasource?.id === datasource.id
                         ? 'text-blue-700 dark:text-blue-400'
@@ -422,7 +432,7 @@ export default function SettingsPanel({
               <div className="p-6 border-b border-gray-200 dark:border-gray-700">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-3">
-                    <span className="text-3xl">{DATA_SOURCE_ICONS[selectedDatasource.id] || '📊'}</span>
+                    <DataSourceIcon datasourceId={selectedDatasource.id} size={36} />
                     <div>
                       <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
                         {selectedDatasource.name}
