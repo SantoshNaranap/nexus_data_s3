@@ -248,26 +248,41 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
         return _user_cache[f"last:{search_lower}"]
 
     try:
-        # Retry with backoff for rate limiting
+        # Retry with backoff for rate limiting and pagination
         import time
         max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                result = slack_client.users_list()
+        all_members = []
+        cursor = None
+
+        # Paginate through all users
+        while True:
+            for attempt in range(max_retries):
+                try:
+                    if cursor:
+                        result = slack_client.users_list(limit=200, cursor=cursor)
+                    else:
+                        result = slack_client.users_list(limit=200)
+                    break
+                except SlackApiError as e:
+                    if 'ratelimited' in str(e) and attempt < max_retries - 1:
+                        wait_time = int(e.response.headers.get('Retry-After', 2))
+                        logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                        time.sleep(wait_time)
+                    else:
+                        raise
+
+            all_members.extend(result.get("members", []))
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
                 break
-            except SlackApiError as e:
-                if 'ratelimited' in str(e) and attempt < max_retries - 1:
-                    wait_time = int(e.response.headers.get('Retry-After', 2))
-                    logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
-                    time.sleep(wait_time)
-                else:
-                    raise
+
+        logger.info(f"🔍 Loaded {len(all_members)} users for lookup")
 
         # First pass: look for exact matches and build cache
         exact_match = None
         partial_matches = []
 
-        for user in result["members"]:
+        for user in all_members:
             # Skip deleted users and bots
             if user.get("deleted") or user.get("is_bot"):
                 continue
@@ -1126,27 +1141,42 @@ async def handle_send_dm(arguments: dict) -> list[TextContent]:
 # ==================== User Handlers ====================
 
 async def handle_list_users(arguments: dict) -> list[TextContent]:
-    """List all users."""
-    limit = arguments.get("limit", 100)
-
-    result = slack_client.users_list(limit=limit)
+    """List all users with pagination support."""
+    limit = arguments.get("limit", 500)  # Higher default limit
 
     users = []
-    for user in result["members"]:
-        if user.get("deleted") or user.get("is_bot"):
-            continue
+    cursor = None
 
-        profile = user.get("profile", {})
-        users.append({
-            "id": user["id"],
-            "name": user["name"],
-            "real_name": user.get("real_name", ""),
-            "email": profile.get("email", ""),
-            "title": profile.get("title", ""),
-            "status_text": profile.get("status_text", ""),
-            "status_emoji": profile.get("status_emoji", ""),
-            "is_admin": user.get("is_admin", False),
-        })
+    # Paginate through all users
+    while True:
+        if cursor:
+            result = slack_client.users_list(limit=200, cursor=cursor)
+        else:
+            result = slack_client.users_list(limit=200)
+
+        for user in result.get("members", []):
+            if user.get("deleted") or user.get("is_bot"):
+                continue
+
+            profile = user.get("profile", {})
+            users.append({
+                "id": user["id"],
+                "name": user["name"],
+                "real_name": user.get("real_name", ""),
+                "email": profile.get("email", ""),
+                "title": profile.get("title", ""),
+                "status_text": profile.get("status_text", ""),
+                "status_emoji": profile.get("status_emoji", ""),
+                "is_admin": user.get("is_admin", False),
+            })
+
+        # Check for more pages
+        cursor = result.get("response_metadata", {}).get("next_cursor")
+        if not cursor or len(users) >= limit:
+            break
+
+    # Trim to requested limit
+    users = users[:limit]
 
     response = {
         "count": len(users),
