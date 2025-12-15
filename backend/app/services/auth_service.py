@@ -1,11 +1,11 @@
-"""Authentication service for Google OAuth and JWT management."""
+"""Authentication service for email/password auth and JWT management."""
 
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
-from authlib.integrations.starlette_client import OAuth
 from jose import JWTError, jwt
+from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,23 +14,22 @@ from app.models.database import User
 
 logger = logging.getLogger(__name__)
 
-# Initialize OAuth
-oauth = OAuth()
-
-# Configure Google OAuth
-oauth.register(
-    name="google",
-    client_id=settings.google_oauth_client_id,
-    client_secret=settings.google_oauth_client_secret,
-    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-    client_kwargs={
-        "scope": "openid email profile",
-    },
-)
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class AuthService:
     """Service for handling authentication operations."""
+
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Hash a password using bcrypt."""
+        return pwd_context.hash(password)
+
+    @staticmethod
+    def verify_password(plain_password: str, hashed_password: str) -> bool:
+        """Verify a password against its hash."""
+        return pwd_context.verify(plain_password, hashed_password)
 
     @staticmethod
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -86,59 +85,32 @@ class AuthService:
             return None
 
     @staticmethod
-    async def get_or_create_user(
+    async def create_user(
         db: AsyncSession,
         email: str,
-        google_id: str,
+        password: str,
         name: Optional[str] = None,
-        profile_picture: Optional[str] = None,
     ) -> User:
         """
-        Get existing user or create new user from Google profile.
+        Create a new user with email and password.
 
         Args:
             db: Database session
             email: User's email
-            google_id: Google user ID
-            name: User's name
-            profile_picture: URL to profile picture
+            password: Plain text password (will be hashed)
+            name: User's name (optional)
 
         Returns:
             User object
         """
-        # Try to find user by google_id first
-        result = await db.execute(
-            select(User).where(User.google_id == google_id)
-        )
-        user = result.scalar_one_or_none()
-
-        if user:
-            # Update user information if changed
-            updated = False
-            if user.email != email:
-                user.email = email
-                updated = True
-            if name and user.name != name:
-                user.name = name
-                updated = True
-            if profile_picture and user.profile_picture != profile_picture:
-                user.profile_picture = profile_picture
-                updated = True
-
-            if updated:
-                user.updated_at = datetime.utcnow()
-                await db.commit()
-                await db.refresh(user)
-
-            logger.info(f"Existing user logged in: {email}")
-            return user
+        # Hash the password
+        password_hash = AuthService.hash_password(password)
 
         # Create new user
         user = User(
             email=email,
-            google_id=google_id,
+            password_hash=password_hash,
             name=name,
-            profile_picture=profile_picture,
         )
 
         db.add(user)
@@ -146,6 +118,33 @@ class AuthService:
         await db.refresh(user)
 
         logger.info(f"New user created: {email}")
+        return user
+
+    @staticmethod
+    async def authenticate_user(
+        db: AsyncSession,
+        email: str,
+        password: str,
+    ) -> Optional[User]:
+        """
+        Authenticate a user with email and password.
+
+        Args:
+            db: Database session
+            email: User's email
+            password: Plain text password
+
+        Returns:
+            User object if authenticated, None otherwise
+        """
+        user = await AuthService.get_user_by_email(db, email)
+        if not user:
+            return None
+
+        if not AuthService.verify_password(password, user.password_hash):
+            return None
+
+        logger.info(f"User authenticated: {email}")
         return user
 
     @staticmethod
@@ -183,21 +182,19 @@ class AuthService:
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def get_user_by_google_id(db: AsyncSession, google_id: str) -> Optional[User]:
+    async def email_exists(db: AsyncSession, email: str) -> bool:
         """
-        Get user by Google ID.
+        Check if an email is already registered.
 
         Args:
             db: Database session
-            google_id: Google user ID
+            email: Email to check
 
         Returns:
-            User object or None if not found
+            True if email exists, False otherwise
         """
-        result = await db.execute(
-            select(User).where(User.google_id == google_id)
-        )
-        return result.scalar_one_or_none()
+        user = await AuthService.get_user_by_email(db, email)
+        return user is not None
 
 
 # Export singleton instance

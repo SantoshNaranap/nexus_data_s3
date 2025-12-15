@@ -15,11 +15,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.services.mcp_service import mcp_service
 from app.models.database import ChatHistory
+from anthropic import APIStatusError
 
 logger = logging.getLogger(__name__)
 
 # Thread pool for running synchronous Anthropic streaming in background
 _stream_executor = ThreadPoolExecutor(max_workers=10)
+
+
+def retry_on_overload(func, max_retries=3, base_delay=1.0):
+    """
+    Decorator/wrapper for retrying Claude API calls on overload errors.
+    Uses exponential backoff with jitter.
+    """
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except APIStatusError as e:
+                if e.status_code == 529 or "overloaded" in str(e).lower():
+                    last_error = e
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    raise
+            except Exception as e:
+                if "overloaded" in str(e).lower():
+                    last_error = e
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    raise
+        # All retries exhausted
+        logger.error(f"Claude API still overloaded after {max_retries} retries")
+        raise last_error or Exception("Claude API overloaded - please try again in a moment")
+    return wrapper
 
 # Performance tracking
 PERF_METRICS = {
@@ -128,19 +161,27 @@ class ChatService:
             db: Database session
         """
         try:
-            # Save each message
+            # Save each message (skip empty content to avoid Claude API errors)
+            saved_count = 0
             for message in messages:
+                content = message.get("content")
+                # Skip empty messages - Claude API requires non-empty content
+                if not content or not str(content).strip():
+                    logger.debug(f"Skipping empty message with role: {message.get('role')}")
+                    continue
+
                 chat_record = ChatHistory(
                     user_id=user_id,
                     session_id=session_id,
                     datasource=datasource,
                     role=message.get("role"),
-                    content=message.get("content"),
+                    content=content,
                 )
                 db.add(chat_record)
+                saved_count += 1
 
             await db.commit()
-            logger.info(f"Saved {len(messages)} messages to chat history for user {user_id[:8]}...")
+            logger.info(f"Saved {saved_count} messages to chat history for user {user_id[:8]}...")
 
         except Exception as e:
             await db.rollback()
@@ -186,8 +227,13 @@ class ChatService:
             result = await db.execute(query)
             chat_records = result.scalars().all()
 
-            # Convert to dict format
-            messages = [record.to_dict() for record in chat_records]
+            # Convert to dict format and filter out empty messages
+            messages = []
+            for record in chat_records:
+                msg = record.to_dict()
+                # Claude API requires all messages to have non-empty content
+                if msg.get("content") and str(msg.get("content", "")).strip():
+                    messages.append(msg)
 
             logger.info(f"Retrieved {len(messages)} messages from chat history for user {user_id[:8]}...")
             return messages
@@ -537,10 +583,52 @@ class ChatService:
         # Create system prompt
         system_prompt = self._create_system_prompt(datasource)
 
-        # Process with Claude
-        response_text, tool_calls = await self._call_claude(
-            messages, tools, system_prompt, datasource, credential_session_id, user_id, db
-        )
+        # TRY FAST PATH: Use direct routing for common queries
+        fast_tools = await self._fast_tool_routing(message, tools, datasource)
+
+        if fast_tools:
+            # FAST PATH: Direct routing identified tools, execute in parallel
+            logger.info(f"⚡ Using FAST PATH with {len(fast_tools)} tool(s): {[t['tool'] for t in fast_tools]}")
+
+            # Execute tools in parallel
+            tool_results = await self._execute_tools_parallel(
+                fast_tools, datasource, credential_session_id, user_id, db
+            )
+
+            # Build context from tool results for Claude to generate response
+            tool_context = "\n\n".join([
+                f"Tool: {r['tool']}\nResult: {r.get('result', r.get('error', 'No result'))}"
+                for r in tool_results
+            ])
+
+            # Add tool results to messages for context
+            messages.append({
+                "role": "assistant",
+                "content": f"I retrieved the following data:\n{tool_context[:8000]}"
+            })
+            messages.append({
+                "role": "user",
+                "content": "Based on the data above, please provide a clear, well-formatted response to my original question."
+            })
+
+            # Use Claude just for response generation (no tools needed, with retry)
+            @retry_on_overload
+            def create_response():
+                return self.client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=messages,
+                )
+            response = create_response()
+
+            response_text = response.content[0].text if response.content else ""
+            tool_calls = [{"tool": t["tool"], "args": t["args"]} for t in fast_tools]
+        else:
+            # SLOW PATH: Process with Claude tool loop
+            response_text, tool_calls = await self._call_claude(
+                messages, tools, system_prompt, datasource, credential_session_id, user_id, db
+            )
 
         # Add assistant message to history
         assistant_message = {"role": "assistant", "content": response_text}
@@ -642,7 +730,10 @@ class ChatService:
 
         # IMMEDIATE FEEDBACK - Send within 50ms
         immediate_feedback = self._get_immediate_feedback_message(datasource, message)
-        yield immediate_feedback + "\n\n"
+        thinking_summary = self._get_thinking_summary(datasource, message)
+        # Send thinking event for the collapsible indicator
+        yield {"type": "thinking", "content": thinking_summary}
+        yield {"type": "text", "content": immediate_feedback + "\n\n"}
         logger.info(f"⚡ Immediate feedback sent in {(time.time() - start_time)*1000:.0f}ms")
 
         # Get session history
@@ -791,108 +882,41 @@ class ChatService:
         return await mcp_service.get_cached_tools(datasource)
 
     def _create_system_prompt(self, datasource: str) -> str:
-        """Create system prompt for Claude."""
-        connector_info = mcp_service.connectors.get(datasource, {})
-        connector_name = connector_info.get("name", datasource)
+        """Create system prompt for Claude using connector registry."""
+        # Import from connector registry
+        from app.connectors import get_connector, get_system_prompt_addition
 
-        base_prompt = f"""You are a helpful assistant that can query and interact with {connector_name}.
+        connector = get_connector(datasource)
+        connector_name = connector.metadata.name if connector else datasource
 
-You have access to tools that allow you to interact with the {connector_name} data source.
-When the user asks questions or requests actions, use the appropriate tools to fulfill their requests.
+        base_prompt = f"""You are an assistant that queries {connector_name} data for the user.
 
-Always:
-1. Use tools when needed to get accurate, up-to-date information
-2. Provide clear, concise responses
-3. Format data in a readable way (use tables, lists, etc. when appropriate)
-4. If you encounter errors, explain them clearly to the user
-5. Ask clarifying questions if the user's request is ambiguous
-6. When interpreting dates from the data source, parse them carefully in ISO format (YYYY-MM-DD)
-7. Present the actual data received from tools without making assumptions or adding interpretations about dates
+CRITICAL RULES:
+1. ALWAYS use tools to answer questions. NEVER say data doesn't exist without checking first.
+2. ALWAYS show the actual data returned by tools. Never summarize as "no results" if data was returned.
+3. The user has authorized access to this data. Show ALL content including credentials, passwords, API keys.
+4. If a tool returns results, DISPLAY THEM. Do not filter or hide any information.
+5. If one search doesn't find results, try alternative searches before saying "not found".
+
+BEHAVIOR:
+- User asks about channels → use list_channels, then show ALL matching results
+- User asks about messages/content → use search_messages, show ALL results with full text
+- User asks about conversations with someone → use read_dm_with_user
+- User asks for credentials/passwords → use search_messages, show the ACTUAL credentials found
+
+NEVER DO THIS:
+- Never say "I couldn't find X" without actually calling a tool first
+- Never say "no channels named X" without calling list_channels
+- Never hide or redact credentials/passwords - this is the user's own authorized data
+- Never make claims about what exists or doesn't exist based on assumptions
 
 Current data source: {connector_name}
 """
 
-        # Add JIRA-specific guidance
-        if datasource == "jira":
-            base_prompt += """
-
-JIRA-SPECIFIC GUIDELINES:
-
-🎯 **RECOMMENDED: Use the query_jira tool for ALL user queries!**
-
-The query_jira tool automatically handles:
-- Name matching ("austin" → "Austin Prabu")
-- Project name resolution ("Oralia-v2" → project key "ORALIA")
-- Status filters ("open issues", "closed", "backlog")
-- Count detection ("how many")
-- JQL generation
-
-**How to use query_jira:**
-Simply pass the user's question directly to it:
-- query_jira({"query": "What is austin working on in Oralia-v2?"})
-- query_jira({"query": "How many open bugs are there?"})
-- query_jira({"query": "Show me the backlog"})
-
-**When to use other tools:**
-Only use list_projects, get_project, search_issues, etc. when:
-- User explicitly asks for ALL projects: use list_projects
-- User asks for specific issue details by key: use get_issue
-- You need to create/update issues: use create_issue, update_issue
-- query_jira didn't return the expected results
-
-**Response Format:**
-- Always show the 'total' count from results
-- Display issue keys, summaries, statuses, and assignees clearly
-- For count queries, emphasize the number in your response
-"""
-
-        # Add S3-specific guidance
-        if datasource == "s3":
-            base_prompt += """
-
-S3-SPECIFIC GUIDELINES:
-1. **Always call list_buckets FIRST** to see available buckets in the AWS account
-2. **Bucket parameter is REQUIRED** for most operations - never call list_objects, read_object, write_object, or search_objects without the bucket parameter
-3. **Two-step workflow for listing contents:**
-   - Step 1: Call list_buckets to get available bucket names
-   - Step 2: Use the bucket name in list_objects: {"bucket": "bucket-name-here"}
-4. **Three-step workflow for reading file contents:**
-   - Step 1: Call list_objects to get the exact object keys
-   - Step 2: Copy the EXACT "key" value from the list_objects response
-   - Step 3: Call read_object with BOTH bucket AND the exact key: {"bucket": "bucket-name", "key": "exact-key-from-list"}
-5. **CRITICAL for read_object:**
-   - The "key" parameter must be the EXACT string from list_objects response
-   - Do NOT modify the key (no URL encoding, no adding/removing slashes)
-   - Example: If list_objects returns "key": "Chatbot Architecture Documentation.md", use EXACTLY that string
-6. **Common user requests:**
-   - "Show me the contents of [bucket-name]" → Call list_objects with {"bucket": "bucket-name-here"}
-   - "What buckets do I have?" → Call list_buckets with {}
-   - "Read file [name]" → First call list_objects to find the exact key, then read_object with exact key
-7. **ALWAYS provide the bucket name** when calling any S3 tool except list_buckets
-8. **When user mentions a specific bucket name**, use that exact name in the bucket parameter
-"""
-
-        # Add Google Workspace-specific guidance
-        if datasource == "google_workspace":
-            from app.core.config import settings
-            email_info = f" (configured as: {settings.user_google_email})" if settings.user_google_email else ""
-            base_prompt += f"""
-
-GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
-1. **User email is pre-configured{email_info}** - DO NOT ask the user for their email address
-2. **Directly call tools** when the user asks about their Google data (Docs, Sheets, Drive, Calendar, Gmail, etc.)
-3. **Common user requests:**
-   - "Show me my Google Docs" → Call search_drive_files with mimeType filter
-   - "What's on my calendar?" → Call get_events
-   - "Show my recent emails" → Call list_messages
-   - "List my spreadsheets" → Call search_drive_files with Sheets mimeType
-   - "What files are in Drive?" → Call search_drive_files
-4. **OAuth Authorization:**
-   - On first use, tools may require OAuth authorization
-   - The system will automatically initiate the OAuth flow
-   - Follow any authorization instructions provided by the tools
-5. **Always use tools first** - don't ask for the email, just call the appropriate tool directly
-"""
+        # Add connector-specific guidance from registry
+        connector_specific = get_system_prompt_addition(datasource)
+        if connector_specific:
+            base_prompt += connector_specific
 
         return base_prompt
 
@@ -902,44 +926,16 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
         datasource: str,
     ) -> Optional[List[dict]]:
         """
-        INSTANT tool routing for simple, common queries.
+        INSTANT tool routing for simple, common queries using connector registry.
         Skips Haiku entirely (~1-2 seconds saved).
         Returns tool calls directly for known patterns.
         """
-        message_lower = message.lower().strip()
+        # Import from connector registry - delegates to connector-specific routing
+        from app.connectors import get_direct_routing
 
-        # S3 direct patterns
-        if datasource == "s3":
-            if any(kw in message_lower for kw in ["bucket", "buckets", "what bucket", "list bucket", "show bucket"]):
-                return [{"tool": "list_buckets", "args": {}}]
-
-        # JIRA direct patterns
-        if datasource == "jira":
-            if any(kw in message_lower for kw in ["project", "projects", "list project", "show project", "what project"]):
-                return [{"tool": "list_projects", "args": {}}]
-
-            # Any question about work/issues/tasks - use query_jira directly
-            if any(kw in message_lower for kw in [
-                "working on", "assigned", "issue", "task", "sprint", "backlog",
-                "bug", "story", "ticket", "open", "closed", "status", "who"
-            ]):
-                return [{"tool": "query_jira", "args": {"query": message}}]
-
-        # MySQL direct patterns
-        if datasource == "mysql":
-            if any(kw in message_lower for kw in ["table", "tables", "list table", "show table", "what table"]):
-                return [{"tool": "list_tables", "args": {}}]
-
-        # Google Workspace direct patterns
-        if datasource == "google_workspace":
-            if any(kw in message_lower for kw in ["calendar", "event", "meeting", "schedule"]):
-                return [{"tool": "get_events", "args": {}}]
-            if any(kw in message_lower for kw in ["email", "mail", "inbox", "gmail"]):
-                return [{"tool": "list_messages", "args": {}}]
-            if any(kw in message_lower for kw in ["drive", "file", "doc", "sheet", "document"]):
-                return [{"tool": "search_drive_files", "args": {}}]
-
-        return None  # Not a simple pattern, use Haiku or Sonnet
+        result = get_direct_routing(datasource, message)
+        logger.info(f"🔍 Direct routing check: datasource={datasource}, message='{message[:50]}...', result={result}")
+        return result
 
     async def _fast_tool_routing(
         self,
@@ -960,27 +956,39 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
         start_time = time.time()
 
         # Create a minimal prompt for tool routing
-        routing_prompt = f"""You are a fast tool router. Given a user query and available tools, determine which tool(s) to call.
+        tools_summary = json.dumps([{'name': t['name'], 'description': t['description'][:100]} for t in tools])
+        routing_prompt = f"""You are a fast tool router for {datasource}. Return JSON array of tool calls.
 
-RULES:
-1. Return ONLY tool calls, no explanations
-2. If the query is simple and maps directly to a tool, return the tool call
-3. If the query is complex or ambiguous, return empty (let the main model handle it)
-4. For {datasource}, prefer the most direct tool
+CRITICAL RULE FOR SLACK:
+- When user mentions a PERSON'S NAME (like "Ananth", "Akash", "John") and wants their messages/what they said:
+  → ALWAYS use read_dm_with_user, NOT search_messages
+  → read_dm_with_user gets actual conversation history
+  → search_messages only finds public channel mentions
 
-Available tools: {json.dumps([{'name': t['name'], 'description': t['description'][:100]} for t in tools])}
+Available tools: {tools_summary}
 
-Respond with a JSON array of tool calls, or empty array [] if unsure.
-Example: [{{"tool": "list_buckets", "args": {{}}}}]
+Examples:
+- "what did Ananth say yesterday" → [{{"tool": "read_dm_with_user", "args": {{"user": "Ananth", "limit": 50}}}}]
+- "did Akash send me anything" → [{{"tool": "read_dm_with_user", "args": {{"user": "Akash", "limit": 50}}}}]
+- "messages from John" → [{{"tool": "read_dm_with_user", "args": {{"user": "John", "limit": 50}}}}]
+- "conversations with Austin" → [{{"tool": "read_dm_with_user", "args": {{"user": "Austin", "limit": 50}}}}]
+- "search for database credentials" → [{{"tool": "search_messages", "args": {{"query": "database credentials", "limit": 50}}}}]
+- "find password" → [{{"tool": "search_messages", "args": {{"query": "password", "limit": 50}}}}]
+- "list channels" → [{{"tool": "list_channels", "args": {{}}}}]
+
+Return JSON array only, no explanations.
 """
 
         try:
-            response = self.client.messages.create(
-                model="claude-3-5-haiku-20241022",  # Fast model for routing
-                max_tokens=500,
-                system=routing_prompt,
-                messages=[{"role": "user", "content": message}],
-            )
+            @retry_on_overload
+            def haiku_routing():
+                return self.client.messages.create(
+                    model="claude-3-5-haiku-20241022",  # Fast model for routing
+                    max_tokens=500,
+                    system=routing_prompt,
+                    messages=[{"role": "user", "content": message}],
+                )
+            response = haiku_routing()
 
             elapsed = time.time() - start_time
             PERF_METRICS["haiku_routing_time"].append(elapsed)
@@ -1182,6 +1190,38 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
 
         return "⚡ *Processing...*"
 
+    def _get_thinking_summary(self, datasource: str, message: str) -> str:
+        """Generate a thinking summary for the collapsible thinking indicator."""
+        message_lower = message.lower()
+
+        # Build a descriptive thinking message based on what we're doing
+        thinking_parts = []
+
+        # Add datasource context
+        datasource_names = {
+            "s3": "Amazon S3",
+            "jira": "JIRA",
+            "mysql": "MySQL database",
+            "google_workspace": "Google Workspace",
+            "slack": "Slack",
+            "shopify": "Shopify",
+        }
+        ds_name = datasource_names.get(datasource, datasource)
+
+        # Analyze query intent
+        if any(kw in message_lower for kw in ["search", "find", "look for", "where"]):
+            thinking_parts.append(f"Searching {ds_name} for relevant information")
+        elif any(kw in message_lower for kw in ["list", "show", "get", "what"]):
+            thinking_parts.append(f"Retrieving data from {ds_name}")
+        elif any(kw in message_lower for kw in ["compare", "difference", "between"]):
+            thinking_parts.append(f"Comparing information in {ds_name}")
+        elif any(kw in message_lower for kw in ["similar", "apps", "market", "competitors"]):
+            thinking_parts.append("Analyzing marketplace and competitive landscape")
+        else:
+            thinking_parts.append(f"Querying {ds_name}")
+
+        return thinking_parts[0] if thinking_parts else f"Processing request for {ds_name}"
+
     async def _call_claude(
         self,
         messages: List[dict],
@@ -1197,14 +1237,17 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
         max_iterations = 25  # Allow more iterations for complex queries
 
         for iteration in range(max_iterations):
-            # Call Claude
-            response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
-                system=system_prompt,
-                messages=messages,
-                tools=tools if tools else None,
-            )
+            # Call Claude with retry on overload
+            @retry_on_overload
+            def call_claude_api():
+                return self.client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools if tools else None,
+                )
+            response = call_claude_api()
 
             # Check if Claude wants to use tools
             tool_use_blocks = [
@@ -1393,7 +1436,7 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
         user_id: Optional[str] = None,
         db: Optional[AsyncSession] = None,
     ) -> AsyncGenerator[str, None]:
-        """Call Claude API with streaming and tool support - TRUE ASYNC STREAMING."""
+        """Call Claude API with streaming, extended thinking, and tool support."""
         max_iterations = 25  # Increased to allow more attempts for complex queries
 
         for iteration in range(max_iterations):
@@ -1404,22 +1447,50 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
             def run_claude_stream():
                 """Run sync stream in thread, put events in queue immediately."""
                 try:
-                    stream = self.client.messages.stream(
-                        model="claude-sonnet-4-5-20250929",
-                        max_tokens=4096,
-                        system=system_prompt,
-                        messages=messages,
-                        tools=tools if tools else None,
-                    )
+                    # Extended thinking parameters
+                    # Note: When using extended thinking with tools, we need to handle it carefully
+                    stream_params = {
+                        "model": "claude-sonnet-4-5-20250929",
+                        "max_tokens": 16000,
+                        "system": system_prompt,
+                        "messages": messages,
+                    }
+
+                    # Add tools if available
+                    if tools:
+                        stream_params["tools"] = tools
+
+                    # Enable extended thinking (works with Sonnet 4)
+                    stream_params["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 4000
+                    }
+
+                    stream = self.client.messages.stream(**stream_params)
                     with stream as event_stream:
+                        current_block_type = None
                         for event in event_stream:
-                            if event.type == "content_block_delta":
-                                if hasattr(event.delta, "text"):
-                                    # Put text in queue immediately for streaming
+                            if event.type == "content_block_start":
+                                # Track what type of block we're in
+                                if hasattr(event.content_block, "type"):
+                                    current_block_type = event.content_block.type
+                                    if current_block_type == "thinking":
+                                        # Signal start of thinking
+                                        queue.put_nowait({"type": "thinking_start"})
+                                    elif current_block_type == "tool_use":
+                                        queue.put_nowait({"type": "tool_start", "block": event.content_block})
+                            elif event.type == "content_block_delta":
+                                if hasattr(event.delta, "thinking"):
+                                    # Stream thinking content
+                                    queue.put_nowait({"type": "thinking", "content": event.delta.thinking})
+                                elif hasattr(event.delta, "text"):
+                                    # Stream regular text content
                                     queue.put_nowait({"type": "text", "content": event.delta.text})
-                            elif event.type == "content_block_start":
-                                if hasattr(event.content_block, "type") and event.content_block.type == "tool_use":
-                                    queue.put_nowait({"type": "tool_start", "block": event.content_block})
+                            elif event.type == "content_block_stop":
+                                if current_block_type == "thinking":
+                                    # Signal end of thinking
+                                    queue.put_nowait({"type": "thinking_end"})
+                                current_block_type = None
                         # Get final message before exiting context
                         final_message_holder["message"] = event_stream.get_final_message()
                     queue.put_nowait(None)  # Signal completion
@@ -1435,18 +1506,32 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
             # Collect events as they arrive
             tool_use_blocks = []
             text_chunks = []
+            thinking_chunks = []
+            is_thinking = False
 
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=120.0)
                     if event is None:
                         break  # Stream complete
-                    if event.get("type") == "text":
+                    event_type = event.get("type")
+
+                    if event_type == "thinking_start":
+                        is_thinking = True
+                        yield {"type": "thinking_start"}
+                    elif event_type == "thinking":
+                        # Stream thinking content to frontend
+                        thinking_chunks.append(event["content"])
+                        yield {"type": "thinking", "content": event["content"]}
+                    elif event_type == "thinking_end":
+                        is_thinking = False
+                        yield {"type": "thinking_end"}
+                    elif event_type == "text":
                         text_chunks.append(event["content"])
-                        yield {"type": "text", "content": event["content"]}  # Stream immediately as structured event!
-                    elif event.get("type") == "tool_start":
+                        yield {"type": "text", "content": event["content"]}
+                    elif event_type == "tool_start":
                         tool_use_blocks.append(event["block"])
-                    elif event.get("type") == "error":
+                    elif event_type == "error":
                         yield {"type": "text", "content": f"\n\nError: {event['error']}"}
                         break
                 except asyncio.TimeoutError:

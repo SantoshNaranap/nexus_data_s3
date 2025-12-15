@@ -10,6 +10,7 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
   withCredentials: true,
+  timeout: 10000, // 10 second timeout
 });
 
 export const datasourceApi = {
@@ -56,7 +57,10 @@ export const chatApi = {
     onDone: (metadata?: { sources?: SourceReference[]; followUpQuestions?: string[] }) => void,
     onError: (error: string) => void,
     onAgentStep?: (step: AgentStep) => void,
-    onSource?: (source: SourceReference) => void
+    onSource?: (source: SourceReference) => void,
+    onThinking?: (content: string) => void,
+    onThinkingStart?: () => void,
+    onThinkingEnd?: () => void
   ): Promise<void> => {
     const response = await fetch(`${API_BASE_URL}/api/chat/message/stream`, {
       method: 'POST',
@@ -98,6 +102,21 @@ export const chatApi = {
                   break;
                 case 'content':
                   onChunk(data.content);
+                  break;
+                case 'thinking_start':
+                  if (onThinkingStart) {
+                    onThinkingStart();
+                  }
+                  break;
+                case 'thinking':
+                  if (onThinking) {
+                    onThinking(data.content);
+                  }
+                  break;
+                case 'thinking_end':
+                  if (onThinkingEnd) {
+                    onThinkingEnd();
+                  }
                   break;
                 case 'agent_step':
                   if (onAgentStep) {
@@ -146,6 +165,22 @@ export const chatApi = {
   },
 };
 
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface SignupCredentials {
+  email: string;
+  password: string;
+  name?: string;
+}
+
+export interface AuthResponse {
+  message: string;
+  user: User;
+}
+
 export const authApi = {
   getCurrentUser: async (): Promise<User | null> => {
     try {
@@ -157,12 +192,18 @@ export const authApi = {
     }
   },
 
-  logout: async (): Promise<void> => {
-    await api.post('/api/auth/logout');
+  login: async (credentials: LoginCredentials): Promise<AuthResponse> => {
+    const response = await api.post<AuthResponse>('/api/auth/login', credentials);
+    return response.data;
   },
 
-  getGoogleAuthUrl: (): string => {
-    return `${API_BASE_URL}/api/auth/google`;
+  signup: async (credentials: SignupCredentials): Promise<AuthResponse> => {
+    const response = await api.post<AuthResponse>('/api/auth/signup', credentials);
+    return response.data;
+  },
+
+  logout: async (): Promise<void> => {
+    await api.post('/api/auth/logout');
   },
 };
 

@@ -1,115 +1,165 @@
-"""Authentication endpoints for Google OAuth and JWT."""
+"""Authentication endpoints for email/password auth and JWT."""
 
-import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.config import settings
+from app.core.logging import get_logger, security_logger
 from app.middleware.auth import get_current_user, get_current_user_optional
 from app.models.database import User
-from app.services.auth_service import auth_service, oauth
+from app.services.auth_service import auth_service
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 
-@router.get("/google")
-async def google_login(request: Request):
-    """
-    Initiate Google OAuth flow.
-
-    Redirects user to Google OAuth consent page.
-    """
-    # Build redirect URI
-    redirect_uri = request.url_for("google_callback")
-
-    logger.info(f"Initiating Google OAuth flow, redirect URI: {redirect_uri}")
-
-    # Redirect to Google OAuth
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+# ============ Request/Response Models ============
 
 
-@router.get("/callback")
-async def google_callback(
-    request: Request,
+class SignupRequest(BaseModel):
+    """Request model for user signup."""
+    email: EmailStr
+    password: str = Field(..., min_length=8, description="Password must be at least 8 characters")
+    name: Optional[str] = Field(None, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    """Request model for user login."""
+    email: EmailStr
+    password: str
+
+
+class AuthResponse(BaseModel):
+    """Response model for authentication."""
+    message: str
+    user: dict
+
+
+# ============ Endpoints ============
+
+
+@router.post("/signup", response_model=AuthResponse)
+async def signup(
+    request: SignupRequest,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Handle Google OAuth callback.
+    Register a new user with email and password.
 
-    Exchanges authorization code for tokens, creates/updates user,
-    and returns JWT token in HTTPOnly cookie.
+    Returns JWT token in HTTPOnly cookie on success.
     """
+    # Check if email already exists
+    if await auth_service.email_exists(db, request.email):
+        logger.warning(f"Signup attempt with existing email: {request.email}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
+    # Create the user
     try:
-        # Exchange authorization code for access token
-        token = await oauth.google.authorize_access_token(request)
-
-        # Get user info from Google
-        user_info = token.get("userinfo")
-        if not user_info:
-            logger.error("Failed to get user info from Google token")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to get user information from Google",
-            )
-
-        # Extract user information
-        email = user_info.get("email")
-        google_id = user_info.get("sub")  # Google user ID
-        name = user_info.get("name")
-        profile_picture = user_info.get("picture")
-
-        if not email or not google_id:
-            logger.error("Missing required user information from Google")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing required user information",
-            )
-
-        logger.info(f"Google OAuth successful for user: {email}")
-
-        # Get or create user in database
-        user = await auth_service.get_or_create_user(
+        user = await auth_service.create_user(
             db=db,
-            email=email,
-            google_id=google_id,
-            name=name,
-            profile_picture=profile_picture,
+            email=request.email,
+            password=request.password,
+            name=request.name,
         )
-
-        # Create JWT access token
-        access_token = auth_service.create_access_token(
-            data={"user_id": user.id, "email": user.email}
-        )
-
-        # For development, redirect to frontend with token in query param
-        # In production, you might want to redirect to a success page
-        frontend_url = "http://localhost:5173"  # Frontend URL from settings
-
-        # Set token in HTTPOnly cookie
-        response = RedirectResponse(url=f"{frontend_url}/auth/callback?success=true")
-        response.set_cookie(
-            key="access_token",
-            value=access_token,
-            httponly=True,
-            secure=False,  # Set to True in production (HTTPS)
-            samesite="lax",
-            max_age=86400,  # 24 hours
-        )
-
-        logger.info(f"User authenticated successfully: {email}")
-        return response
-
     except Exception as e:
-        logger.error(f"Google OAuth callback error: {e}")
-        # Redirect to frontend with error
-        frontend_url = "http://localhost:5173"
-        return RedirectResponse(url=f"{frontend_url}/auth/callback?error=auth_failed")
+        logger.error(f"Error creating user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user",
+        )
+
+    # Create JWT access token
+    access_token = auth_service.create_access_token(
+        data={"user_id": user.id, "email": user.email}
+    )
+
+    # Set token in HTTPOnly cookie
+    cookie_settings = settings.cookie_settings
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=cookie_settings["httponly"],
+        secure=cookie_settings["secure"],
+        samesite=cookie_settings["samesite"],
+        max_age=settings.jwt_access_token_expire_minutes * 60,
+    )
+
+    security_logger.log_auth_success(user.email, "signup")
+    logger.info(f"User signed up successfully: {user.email}")
+
+    return AuthResponse(
+        message="User created successfully",
+        user={
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+        },
+    )
+
+
+@router.post("/login", response_model=AuthResponse)
+async def login(
+    request: LoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Authenticate user with email and password.
+
+    Returns JWT token in HTTPOnly cookie on success.
+    """
+    # Authenticate user
+    user = await auth_service.authenticate_user(
+        db=db,
+        email=request.email,
+        password=request.password,
+    )
+
+    if not user:
+        security_logger.log_auth_failure(request.email, {"reason": "invalid_credentials"})
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    # Create JWT access token
+    access_token = auth_service.create_access_token(
+        data={"user_id": user.id, "email": user.email}
+    )
+
+    # Set token in HTTPOnly cookie
+    cookie_settings = settings.cookie_settings
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=cookie_settings["httponly"],
+        secure=cookie_settings["secure"],
+        samesite=cookie_settings["samesite"],
+        max_age=settings.jwt_access_token_expire_minutes * 60,
+    )
+
+    security_logger.log_auth_success(user.email, "login")
+    logger.info(f"User logged in successfully: {user.email}")
+
+    return AuthResponse(
+        message="Login successful",
+        user={
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "profile_picture": user.profile_picture,
+        },
+    )
 
 
 @router.get("/me")

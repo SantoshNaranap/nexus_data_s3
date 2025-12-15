@@ -5,6 +5,7 @@ import asyncio
 import time
 import hashlib
 import json
+import sys
 from typing import Dict, Optional, Any, List
 import logging
 from contextlib import asynccontextmanager
@@ -14,6 +15,14 @@ from mcp.client.stdio import stdio_client
 
 from app.core.config import settings
 from app.services.credential_service import credential_service
+from app.connectors import (
+    get_connector,
+    get_all_connectors,
+    get_available_datasources as registry_get_available_datasources,
+    get_connector_env,
+    get_cacheable_tools,
+    get_credential_env_mapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,110 +44,43 @@ class MCPService:
     """Service for managing MCP connector clients."""
 
     def __init__(self):
-        # Use the venv's Python if available
-        import sys
-        python_cmd = sys.executable
-
-        self.connectors: Dict[str, dict] = {
-            "s3": {
-                "name": "Amazon S3",
-                "description": "Query and manage S3 buckets and objects",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/s3/src/s3_server.py")],
-                "env": {
-                    "AWS_ACCESS_KEY_ID": settings.aws_access_key_id,
-                    "AWS_SECRET_ACCESS_KEY": settings.aws_secret_access_key,
-                    "AWS_DEFAULT_REGION": settings.aws_default_region,
-                },
-            },
-            "mysql": {
-                "name": "MySQL",
-                "description": "Query MySQL databases",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/mysql/src/mysql_server.py")],
-                "env": {
-                    "MYSQL_HOST": settings.mysql_host,
-                    "MYSQL_PORT": str(settings.mysql_port),
-                    "MYSQL_USER": settings.mysql_user,
-                    "MYSQL_PASSWORD": settings.mysql_password,
-                    "MYSQL_DATABASE": settings.mysql_database,
-                },
-            },
-            "jira": {
-                "name": "JIRA",
-                "description": "Manage JIRA issues and projects",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/jira/src/jira_server.py")],
-                "env": {
-                    "JIRA_URL": settings.jira_url,
-                    "JIRA_EMAIL": settings.jira_email,
-                    "JIRA_API_TOKEN": settings.jira_api_token,
-                },
-            },
-            "shopify": {
-                "name": "Shopify",
-                "description": "Query Shopify products, orders, and customers",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/shopify/src/shopify_server.py")],
-                "env": {
-                    "SHOPIFY_SHOP_URL": settings.shopify_shop_url,
-                    "SHOPIFY_ACCESS_TOKEN": settings.shopify_access_token,
-                    "SHOPIFY_API_VERSION": settings.shopify_api_version,
-                },
-            },
-            "google_workspace": {
-                "name": "Google Workspace",
-                "description": "Access Google Docs, Sheets, Drive, Gmail, Calendar, and more",
-                "command": python_cmd,
-                "args": [
-                    os.path.abspath("../connectors/google_workspace/main.py"),
-                    "--tool-tier", "core",  # Use core tools (Docs, Sheets, Drive, Calendar, Gmail)
-                    "--single-user"  # Simplified authentication for single user
-                ],
-                "env": {
-                    "GOOGLE_OAUTH_CLIENT_ID": settings.google_oauth_client_id,
-                    "GOOGLE_OAUTH_CLIENT_SECRET": settings.google_oauth_client_secret,
-                    "USER_GOOGLE_EMAIL": settings.user_google_email,
-                    "WORKSPACE_MCP_PORT": "8001",  # Use port 8001 to avoid conflict with FastAPI on 8000
-                    "OAUTHLIB_INSECURE_TRANSPORT": "1",  # For development
-                },
-            },
-            "slack": {
-                "name": "Slack",
-                "description": "Chat with your Slack workspace - read messages, search, send messages, and more",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/slack/src/slack_server.py")],
-                "env": {
-                    "SLACK_BOT_TOKEN": settings.slack_bot_token,
-                    "SLACK_APP_TOKEN": settings.slack_app_token,
-                },
-            },
-            "github": {
-                "name": "GitHub",
-                "description": "Manage GitHub repositories, issues, pull requests, and code",
-                "command": python_cmd,
-                "args": [os.path.abspath("../connectors/github/src/github_server.py")],
-                "env": {
-                    "GITHUB_TOKEN": settings.github_token,
-                },
-            },
-        }
+        """Initialize MCP service using connector registry."""
         self._active_clients: Dict[str, tuple] = {}
         self._connection_locks: Dict[str, asyncio.Lock] = {}  # Per-datasource locks
         self._persistent_sessions: Dict[str, Dict[str, Any]] = {}  # Persistent connections
+        self._python_cmd = sys.executable
+
+    def _get_connector_config(self, connector_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get connector configuration from registry.
+
+        Returns dict with: command, args, env (default env from settings)
+        """
+        connector = get_connector(connector_id)
+        if not connector:
+            return None
+
+        command, args = connector.get_server_command()
+
+        # Get default environment from settings
+        default_env = connector.get_default_env_from_settings(settings)
+
+        # Merge with additional env from connector
+        env = {**default_env, **connector.additional_env}
+
+        return {
+            "command": command,
+            "args": args,
+            "env": env,
+        }
+
+    def get_connector_ids(self) -> List[str]:
+        """Get list of all available connector IDs."""
+        return list(get_all_connectors().keys())
 
     def get_available_datasources(self) -> List[dict]:
-        """Get list of available data sources."""
-        return [
-            {
-                "id": key,
-                "name": connector["name"],
-                "description": connector["description"],
-                "icon": key,
-                "enabled": True,
-            }
-            for key, connector in self.connectors.items()
-        ]
+        """Get list of available data sources from registry."""
+        return registry_get_available_datasources()
 
     async def get_cached_tools(self, datasource: str) -> List[dict]:
         """
@@ -194,7 +136,7 @@ class MCPService:
         Call this at startup to reduce latency.
         """
         if datasources is None:
-            datasources = list(self.connectors.keys())
+            datasources = self.get_connector_ids()
 
         logger.info(f"🔥 Pre-warming connections for: {datasources}")
         start = time.time()
@@ -223,10 +165,19 @@ class MCPService:
         Get environment variables for a connector, merging user credentials
         with defaults from settings.
 
+        Uses the connector registry to map credential fields to env vars.
         Prioritizes user_id credentials over session_id credentials.
         """
-        connector = self.connectors[datasource]
-        env = connector["env"].copy()
+        # Get connector from registry
+        connector = get_connector(datasource)
+        if not connector:
+            raise ValueError(f"Unknown data source: {datasource}")
+
+        # Start with defaults from settings
+        env = connector.get_default_env_from_settings(settings)
+
+        # Add additional env from connector
+        env.update(connector.additional_env)
 
         # Prioritize user_id over session_id
         if user_id:
@@ -244,40 +195,9 @@ class MCPService:
             user_credentials = None
 
         if user_credentials:
-            # Map frontend field names to environment variable names
-            # This handles the naming differences between frontend and backend
-            env_mapping = {
-                # S3
-                "aws_access_key_id": "AWS_ACCESS_KEY_ID",
-                "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
-                "aws_default_region": "AWS_DEFAULT_REGION",
-                # MySQL
-                "mysql_host": "MYSQL_HOST",
-                "mysql_port": "MYSQL_PORT",
-                "mysql_user": "MYSQL_USER",
-                "mysql_password": "MYSQL_PASSWORD",
-                "mysql_database": "MYSQL_DATABASE",
-                # JIRA
-                "jira_url": "JIRA_URL",
-                "jira_email": "JIRA_EMAIL",
-                "jira_api_token": "JIRA_API_TOKEN",
-                # Shopify
-                "shopify_shop_url": "SHOPIFY_SHOP_URL",
-                "shopify_access_token": "SHOPIFY_ACCESS_TOKEN",
-                "shopify_api_version": "SHOPIFY_API_VERSION",
-                # Google Workspace
-                "google_oauth_client_id": "GOOGLE_OAUTH_CLIENT_ID",
-                "google_oauth_client_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
-                "user_google_email": "USER_GOOGLE_EMAIL",
-                # Slack
-                "slack_bot_token": "SLACK_BOT_TOKEN",
-                "slack_app_token": "SLACK_APP_TOKEN",
-            }
-
-            # Update env with user credentials
-            for field_name, env_name in env_mapping.items():
-                if field_name in user_credentials and user_credentials[field_name]:
-                    env[env_name] = user_credentials[field_name]
+            # Use connector's method to convert credentials to env vars
+            user_env = connector.get_env_from_credentials(user_credentials)
+            env.update(user_env)
 
             credential_type = "user" if user_id else "session"
             logger.info(f"Using {credential_type} credentials for {datasource}")
@@ -301,10 +221,13 @@ class MCPService:
             session_id: Optional session ID for anonymous users
             db: Optional database session for retrieving user credentials
         """
-        if datasource not in self.connectors:
+        # Get connector from registry
+        connector = get_connector(datasource)
+        if not connector:
             raise ValueError(f"Unknown data source: {datasource}")
 
-        connector = self.connectors[datasource]
+        # Get server command from connector
+        command, args = connector.get_server_command()
 
         # Get environment variables (with user credentials if available)
         # Prioritizes user_id over session_id
@@ -312,8 +235,8 @@ class MCPService:
 
         # Create server parameters
         server = StdioServerParameters(
-            command=connector["command"],
-            args=connector["args"],
+            command=command,
+            args=args,
             env={**os.environ.copy(), **connector_env},
         )
 
@@ -490,16 +413,8 @@ class MCPService:
         start_time = time.time()
 
         # CHECK CACHE FIRST (instant return if cached)
-        # Only cache read-only operations
-        cacheable_tools = [
-            "list_buckets", "list_objects", "search_objects",  # S3
-            "list_projects", "get_project", "search_issues", "get_issue", "query_jira",  # JIRA
-            "list_tables", "describe_table",  # MySQL (not execute_query - could have side effects)
-            "get_events", "list_messages", "search_drive_files",  # Google Workspace
-            "list_channels", "get_channel_info", "read_messages", "search_messages",  # Slack
-            "list_users", "get_user_info", "get_user_presence", "get_thread_replies", "list_files",  # Slack
-            "read_dm_with_user", "get_user_messages_in_channel", "list_dms", "search_in_dms", "get_channel_activity",  # Slack DM/Conversation
-        ]
+        # Get cacheable tools from connector registry
+        cacheable_tools = get_cacheable_tools(datasource)
 
         cache_key = None
         if tool_name in cacheable_tools:
@@ -533,28 +448,30 @@ class MCPService:
         db: Optional[any] = None,
     ):
         """Create and store a persistent MCP session."""
-        if datasource not in self.connectors:
+        # Get connector from registry
+        connector = get_connector(datasource)
+        if not connector:
             raise ValueError(f"Unknown data source: {datasource}")
 
-        connector = self.connectors[datasource]
+        # Get server command from connector
+        command, args = connector.get_server_command()
         connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
 
         # Create server parameters
         server = StdioServerParameters(
-            command=connector["command"],
-            args=connector["args"],
+            command=command,
+            args=args,
             env={**os.environ.copy(), **connector_env},
         )
 
         # Start the stdio client and keep it alive
         # We need to manage the context manually to keep it persistent
         import subprocess
-        import sys
 
         # Start subprocess directly
         process = await asyncio.create_subprocess_exec(
-            connector["command"],
-            *connector["args"],
+            command,
+            *args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

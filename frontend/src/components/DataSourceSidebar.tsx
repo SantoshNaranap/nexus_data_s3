@@ -1,5 +1,5 @@
 import type { DataSource } from '../types'
-import { DATA_SOURCE_ICONS } from '../constants'
+import DataSourceIcon from './DataSourceIcon'
 
 interface DataSourceSidebarProps {
   datasources: DataSource[]
@@ -61,8 +61,8 @@ export default function DataSourceSidebar({
               disabled={!datasource.enabled}
             >
               <div className="flex items-start space-x-3">
-                <div className="text-2xl flex-shrink-0">
-                  {DATA_SOURCE_ICONS[datasource.id] || '📊'}
+                <div className="flex-shrink-0">
+                  <DataSourceIcon datasourceId={datasource.id} size={28} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">

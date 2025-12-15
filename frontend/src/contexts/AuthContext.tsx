@@ -1,13 +1,14 @@
 import { createContext, useContext, ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { authApi } from '../services/api'
+import { authApi, LoginCredentials, SignupCredentials } from '../services/api'
 import type { User } from '../types'
 
 interface AuthContextType {
   user: User | null
   isLoading: boolean
   isAuthenticated: boolean
-  login: () => void
+  login: (credentials: LoginCredentials) => Promise<void>
+  signup: (credentials: SignupCredentials) => Promise<void>
   logout: () => Promise<void>
   checkAuth: () => Promise<void>
 }
@@ -17,17 +18,29 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
 
-  const { data: user, isLoading } = useQuery({
+  const { data: user, isLoading, isFetching } = useQuery({
     queryKey: ['currentUser'],
     queryFn: authApi.getCurrentUser,
     retry: false,
     refetchOnWindowFocus: false,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   })
+
+  // Only show loading on initial fetch, not on background refetches
+  const showLoading = isLoading && isFetching
 
   const isAuthenticated = !!user
 
-  const login = () => {
-    window.location.href = authApi.getGoogleAuthUrl()
+  const login = async (credentials: LoginCredentials) => {
+    const response = await authApi.login(credentials)
+    // Update the user in cache
+    queryClient.setQueryData(['currentUser'], response.user)
+  }
+
+  const signup = async (credentials: SignupCredentials) => {
+    const response = await authApi.signup(credentials)
+    // Update the user in cache
+    queryClient.setQueryData(['currentUser'], response.user)
   }
 
   const logout = async () => {
@@ -50,7 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user: user || null, isLoading, isAuthenticated, login, logout, checkAuth }}>
+    <AuthContext.Provider value={{ user: user || null, isLoading: showLoading, isAuthenticated, login, signup, logout, checkAuth }}>
       {children}
     </AuthContext.Provider>
   )
