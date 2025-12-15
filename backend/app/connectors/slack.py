@@ -121,6 +121,14 @@ SLACK TOOLS - COMPREHENSIVE GUIDE:
         """Direct routing for common operations. Let the AI handle complex queries."""
         message_lower = message.lower().strip()
 
+        # PRIORITY 0: Explicit search requests - use search_messages, not DM read
+        # "search for messages from X" or "find messages from X"
+        search_from_match = re.search(r'\b(search|find|look)\b.*\bmessages?\b.*\bfrom\s+([\w.@]+)', message_lower)
+        if search_from_match:
+            person = search_from_match.group(2).strip()
+            if person and len(person) > 1:
+                return [{"tool": "search_messages", "args": {"query": f"from:{person}", "limit": 30, "days_ago": 30}}]
+
         # PRIORITY 1: Person-specific queries FIRST (before time-based)
         # "Did X message me" or "any messages from X"
         did_message_match = re.search(r'\bdid\s+(\w+)\s+(message|text|contact|dm|write|send|reach)', message_lower)
