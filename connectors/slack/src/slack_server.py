@@ -9,6 +9,7 @@ Uses the Slack Web API via slack_sdk.
 import json
 import logging
 import os
+import re
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -1020,6 +1021,20 @@ async def handle_search_messages(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     limit = arguments.get("limit", 20)
     days_ago = arguments.get("days_ago", 30)  # Default to last 30 days for relevance
+
+    # Resolve user names in "from:" queries to user IDs
+    # Slack search API requires usernames/IDs, not display names
+    from_match = re.search(r'from:[@]?([^\s]+(?:\s+[^\s]+)?)', query, re.IGNORECASE)
+    if from_match:
+        user_query = from_match.group(1).strip()
+        # Try to resolve to user ID
+        user_id = _get_user_id(user_query)
+        if user_id and not user_id.startswith("AMBIGUOUS:") and not user_id.startswith("NOT_FOUND:"):
+            # Replace with the user ID in the query
+            query = query.replace(from_match.group(0), f"from:<@{user_id}>")
+            logger.info(f"🔍 Resolved user '{user_query}' to ID {user_id}")
+        else:
+            logger.warning(f"⚠️ Could not resolve user '{user_query}' for search")
 
     # Add date filter to search query for recent results
     # Slack search supports "after:YYYY-MM-DD" syntax

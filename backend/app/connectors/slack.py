@@ -143,6 +143,20 @@ SLACK TOOLS - COMPREHENSIVE GUIDE:
             if person not in ['he', 'she', 'they', 'i', 'you', 'we', 'the']:
                 return [{"tool": "read_dm_with_user", "args": {"user": person, "limit": 30}}]
 
+        # "What has X been up to" or "what is X up to" or "what's X doing"
+        up_to_match = re.search(r'\bwhat\s+(?:has|is|was)\s+(\w+)\s+(?:been\s+)?(?:up\s+to|doing|working\s+on|saying)', message_lower)
+        if up_to_match:
+            person = up_to_match.group(1)
+            if person not in ['he', 'she', 'they', 'i', 'you', 'we', 'the', 'it']:
+                return [{"tool": "read_dm_with_user", "args": {"user": person, "limit": 30}}]
+
+        # "X's activity" or "activity from X" or "updates from X"
+        activity_match = re.search(r"(\w+)(?:'s)?\s+(?:activity|updates?|status)|(?:activity|updates?)\s+from\s+(\w+)", message_lower)
+        if activity_match:
+            person = activity_match.group(1) or activity_match.group(2)
+            if person and person not in ['my', 'the', 'their', 'your', 'slack', 'recent', 'latest']:
+                return [{"tool": "read_dm_with_user", "args": {"user": person, "limit": 30}}]
+
         # PRIORITY 2: Comprehensive message retrieval - route to get_all_recent_messages
         if re.search(r'\b(message|messages|slack)\b.*(yesterday|today|recent|missed|catch.*up|summary|summarize)', message_lower):
             # Determine hours based on query
