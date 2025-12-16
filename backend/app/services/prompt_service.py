@@ -24,6 +24,9 @@ class PromptService:
         # Base prompt template
         self._base_template = """You are a helpful assistant that can query and interact with {connector_name}.
 
+**TODAY'S DATE: {current_date}**
+Use this date for any "today", "this week", "this month", "yesterday", "tomorrow" queries.
+
 You have access to tools that allow you to interact with the {connector_name} data source.
 When the user asks questions or requests actions, use the appropriate tools to fulfill their requests.
 
@@ -68,8 +71,10 @@ Current data source: {connector_name}
         if not connector_name:
             connector_name = datasource.upper()
 
-        # Build base prompt
-        prompt = self._base_template.format(connector_name=connector_name)
+        # Build base prompt with current date
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y-%m-%d (%A, %B %d, %Y)")
+        prompt = self._base_template.format(connector_name=connector_name, current_date=current_date)
 
         # Add datasource-specific guidelines
         datasource_prompt = self._get_datasource_prompt(datasource)

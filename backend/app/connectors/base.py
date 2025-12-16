@@ -184,6 +184,28 @@ class BaseConnector(ABC):
                 env[field.env_var] = credentials[field.name]
         return env
 
+    def get_env_from_oauth_tokens(self, tokens: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Convert OAuth tokens dict to environment variables dict.
+
+        Override this method for OAuth-enabled connectors to map
+        access_token, refresh_token, etc. to the appropriate env vars.
+
+        Args:
+            tokens: Dict containing OAuth token data:
+                - access_token: The OAuth access token
+                - refresh_token: Optional refresh token
+                - token_type: Token type (usually "Bearer")
+                - expires_at: Token expiration datetime
+                - scopes: List of granted scopes
+                - provider_email: User's email on the provider
+
+        Returns:
+            Dict of environment variables to set
+        """
+        # Default implementation does nothing - override for OAuth connectors
+        return {}
+
     def get_server_command(self) -> tuple:
         """
         Get the command and args to start the MCP server.

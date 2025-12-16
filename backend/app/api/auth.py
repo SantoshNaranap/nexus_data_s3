@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,9 +12,27 @@ from app.core.config import settings
 from app.core.logging import get_logger, security_logger
 from app.middleware.auth import get_current_user, get_current_user_optional
 from app.models.database import User
-from app.services.auth_service import auth_service
+from app.services.auth_service import (
+    auth_service,
+    AccountLockedError,
+    InvalidCredentialsError,
+)
 
 logger = get_logger(__name__)
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP address from request, handling proxies."""
+    # Check for forwarded header (behind proxy/load balancer)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    # Check for real IP header
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    # Fall back to direct client
+    return request.client.host if request.client else "unknown"
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -46,7 +64,8 @@ class AuthResponse(BaseModel):
 
 @router.post("/signup", response_model=AuthResponse)
 async def signup(
-    request: SignupRequest,
+    signup_request: SignupRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -55,9 +74,17 @@ async def signup(
 
     Returns JWT token in HTTPOnly cookie on success.
     """
+    # Validate password complexity
+    is_valid, errors = auth_service.validate_password(signup_request.password)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Password does not meet requirements", "errors": errors},
+        )
+
     # Check if email already exists
-    if await auth_service.email_exists(db, request.email):
-        logger.warning(f"Signup attempt with existing email: {request.email}")
+    if await auth_service.email_exists(db, signup_request.email):
+        logger.warning(f"Signup attempt with existing email: {signup_request.email}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
@@ -67,9 +94,9 @@ async def signup(
     try:
         user = await auth_service.create_user(
             db=db,
-            email=request.email,
-            password=request.password,
-            name=request.name,
+            email=signup_request.email,
+            password=signup_request.password,
+            name=signup_request.name,
         )
     except Exception as e:
         logger.error(f"Error creating user: {e}")
@@ -109,7 +136,8 @@ async def signup(
 
 @router.post("/login", response_model=AuthResponse)
 async def login(
-    request: LoginRequest,
+    login_request: LoginRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -117,16 +145,35 @@ async def login(
     Authenticate user with email and password.
 
     Returns JWT token in HTTPOnly cookie on success.
+    Includes account lockout protection after failed attempts.
     """
-    # Authenticate user
-    user = await auth_service.authenticate_user(
-        db=db,
-        email=request.email,
-        password=request.password,
-    )
+    client_ip = get_client_ip(request)
+    user_agent = request.headers.get("User-Agent", "")[:500]  # Truncate to avoid storage issues
 
-    if not user:
-        security_logger.log_auth_failure("invalid_credentials", {"email": request.email})
+    try:
+        # Authenticate user (includes lockout checking)
+        user = await auth_service.authenticate_user(
+            db=db,
+            email=login_request.email,
+            password=login_request.password,
+            ip_address=client_ip,
+            user_agent=user_agent,
+        )
+    except AccountLockedError as e:
+        security_logger.log_auth_failure(
+            "account_locked",
+            {"email": login_request.email, "locked_until": str(e.locked_until)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail={
+                "message": "Account temporarily locked due to too many failed attempts",
+                "locked_until": e.locked_until.isoformat(),
+                "retry_after_seconds": int((e.locked_until - __import__('datetime').datetime.utcnow()).total_seconds()),
+            },
+        )
+    except InvalidCredentialsError:
+        security_logger.log_auth_failure("invalid_credentials", {"email": login_request.email})
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",

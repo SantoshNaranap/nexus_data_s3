@@ -15,7 +15,8 @@ from app.core.cache import init_cache_service, get_cache_service
 from app.core.metrics import get_metrics, MetricsMiddleware
 from app.core.exceptions import AppError
 from app.middleware.rate_limit import RateLimitMiddleware, RateLimitConfig
-from app.api import chat, datasources, credentials, auth, agent, health
+from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.api import chat, datasources, credentials, auth, agent, health, oauth
 from app.services.mcp_service import mcp_service
 
 # Configure structured logging
@@ -110,6 +111,9 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 # Add metrics middleware (outermost to capture all requests)
 app.add_middleware(MetricsMiddleware)
 
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Add rate limiting middleware
 if settings.rate_limit_enabled:
     app.add_middleware(
@@ -157,12 +161,26 @@ async def request_context_middleware(request: Request, call_next: Callable):
 
 # ============ Include Routers ============
 
+# Legacy routes (maintain backwards compatibility)
 app.include_router(health.router)  # Health check endpoints
 app.include_router(auth.router)
+app.include_router(oauth.router)  # OAuth provider connections
 app.include_router(chat.router)
 app.include_router(datasources.router)
 app.include_router(credentials.router)
 app.include_router(agent.router)  # Multi-source agent orchestration
+
+# Versioned routes (v1) - same endpoints under /api/v1 prefix
+# This allows gradual migration to versioned API
+from fastapi import APIRouter
+v1_router = APIRouter(prefix="/api/v1")
+v1_router.include_router(health.router, tags=["v1"])
+v1_router.include_router(auth.router, tags=["v1"])
+v1_router.include_router(chat.router, tags=["v1"])
+v1_router.include_router(datasources.router, tags=["v1"])
+v1_router.include_router(credentials.router, tags=["v1"])
+v1_router.include_router(agent.router, tags=["v1"])
+app.include_router(v1_router)
 
 
 # ============ Root Endpoint ============
@@ -176,6 +194,19 @@ async def root():
         "version": settings.version,
         "status": "running",
         "environment": settings.environment,
+    }
+
+
+@app.get("/api/version")
+async def api_version():
+    """Get API version information."""
+    from app.api.v1 import VERSION, VERSION_DATE, CHANGELOG
+    return {
+        "current_version": VERSION,
+        "version_date": VERSION_DATE,
+        "app_version": settings.version,
+        "supported_versions": ["v1"],
+        "changelog": CHANGELOG,
     }
 
 

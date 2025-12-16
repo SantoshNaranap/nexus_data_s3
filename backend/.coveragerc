@@ -1,0 +1,29 @@
+[run]
+source = app
+omit =
+    app/__init__.py
+    app/models/__init__.py
+    */tests/*
+    */__pycache__/*
+    app/init_db.py
+    setup_database.py
+    create_tables.py
+branch = true
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @property
+
+fail_under = 50
+show_missing = true
+precision = 2
+
+[html]
+directory = coverage_html

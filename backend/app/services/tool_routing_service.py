@@ -88,22 +88,15 @@ class ToolRoutingService:
                     "args": {},
                 },
             ],
+            # Google Workspace - only use direct routing for simple list queries
+            # For searches with specific terms, let Claude handle it to extract the query
             "google_workspace": [
                 {
-                    "keywords": ["calendar", "event", "meeting", "schedule"],
+                    "keywords": ["calendar today", "my calendar", "today's calendar", "meetings today"],
                     "tool": "get_events",
                     "args": {},
                 },
-                {
-                    "keywords": ["email", "mail", "inbox", "gmail"],
-                    "tool": "list_messages",
-                    "args": {},
-                },
-                {
-                    "keywords": ["drive", "file", "doc", "sheet", "document"],
-                    "tool": "search_drive_files",
-                    "args": {},
-                },
+                # Removed email/drive direct routing - let Claude extract search queries properly
             ],
             "shopify": [
                 {
@@ -343,7 +336,7 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
             "s3": ["list_buckets"],
             "jira": ["list_projects"],
             "mysql": ["list_tables"],
-            "google_workspace": ["get_events", "list_messages", "search_drive_files"],
+            "google_workspace": ["get_events"],  # Only calendar for ultra-fast, let Claude handle searches
             "shopify": ["list_orders", "list_products"],
             "slack": ["list_channels", "list_users"],
             "github": ["list_repositories"],

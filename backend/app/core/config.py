@@ -100,7 +100,8 @@ class Settings(BaseSettings):
     # Google Workspace (OAuth)
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
-    user_google_email: str = ""  # Optional: for single-user mode
+    google_oauth_redirect_uri: str = "http://localhost:8000/api/oauth/google_workspace/callback"
+    user_google_email: str = ""  # Optional: for single-user mode (legacy)
 
     # Slack
     slack_bot_token: str = ""  # Bot token (xoxb-) for channels
@@ -133,6 +134,50 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_requests_per_minute: int = 60
     rate_limit_requests_per_hour: int = 1000
+
+    # Database pool settings
+    db_pool_size: int = 10  # Number of persistent connections
+    db_max_overflow: int = 20  # Additional connections when pool exhausted
+    db_pool_timeout: int = 30  # Seconds to wait for available connection
+    db_pool_recycle: int = 3600  # Recycle connections after 1 hour
+
+    # Thread pool settings for streaming
+    stream_thread_pool_size: int = 50  # Max concurrent streaming sessions
+    stream_queue_timeout: int = 30  # Seconds to wait for thread availability
+
+    # Cache TTL settings (in seconds)
+    cache_tools_ttl: int = 300  # 5 minutes for tool definitions
+    cache_results_ttl: int = 30  # 30 seconds for query results
+    cache_schema_ttl: int = 600  # 10 minutes for database schemas
+
+    # Timeout settings (in seconds)
+    query_timeout: int = 60  # Timeout for individual datasource queries
+    mcp_connection_timeout: int = 30  # Timeout for MCP server connection
+    claude_api_timeout: int = 120  # Timeout for Claude API calls
+
+    # Chat history settings
+    chat_max_messages_per_session: int = 100  # Max messages to keep per session
+    chat_max_sessions_per_user: int = 50  # Max sessions per user
+    chat_history_retention_days: int = 90  # Auto-delete history older than this
+
+    # Agent orchestrator settings
+    agent_max_iterations: int = 25  # Max tool use iterations
+    agent_max_sources: int = 5  # Max sources to query in parallel
+
+    # Security settings
+    csrf_enabled: bool = True  # Enable CSRF protection
+    max_login_attempts: int = 5  # Lock account after this many failures
+    lockout_duration_minutes: int = 15  # Account lockout duration
+    password_min_length: int = 8
+    password_require_uppercase: bool = True
+    password_require_lowercase: bool = True
+    password_require_digit: bool = True
+    password_require_special: bool = False
+
+    # Redis settings (for session storage and caching)
+    redis_url: str = "redis://localhost:6379/0"
+    redis_enabled: bool = False  # Set to True to use Redis for sessions
+    redis_session_ttl: int = 86400  # 24 hours
 
     # Application version (for health checks)
     version: str = "1.0.0"

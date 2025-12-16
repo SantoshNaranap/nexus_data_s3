@@ -99,6 +99,20 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     setInput(question)
   }
 
+  // Handle sample question click - send immediately
+  const handleSampleQuestionClick = (question: string) => {
+    if (isStreaming) return
+    // Set the input and trigger submit
+    setInput(question)
+    // Use setTimeout to ensure input state is set before submitting
+    setTimeout(() => {
+      const form = document.querySelector('form')
+      if (form) {
+        form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }))
+      }
+    }, 0)
+  }
+
   // Copy message to clipboard
   const handleCopyMessage = async (content: string, index: number) => {
     try {
@@ -563,42 +577,48 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
               </p>
               <div className="mt-8 inline-block text-left bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 max-w-md">
                 <p className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-3">Try asking:</p>
-                <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
+                <div className="space-y-2 text-sm">
                   {datasource.id === 'mysql' && (
                     <>
-                      <p>"Show me the latest users"</p>
-                      <p>"How many rows are in the orders table?"</p>
+                      <button onClick={() => handleSampleQuestionClick('Show me the latest users')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me the latest users"</button>
+                      <button onClick={() => handleSampleQuestionClick('How many rows are in the orders table?')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"How many rows are in the orders table?"</button>
                     </>
                   )}
                   {datasource.id === 's3' && (
                     <>
-                      <p>"What buckets do I have?"</p>
-                      <p>"Show me files in my bucket"</p>
+                      <button onClick={() => handleSampleQuestionClick('What buckets do I have?')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"What buckets do I have?"</button>
+                      <button onClick={() => handleSampleQuestionClick('Show me files in my bucket')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me files in my bucket"</button>
                     </>
                   )}
                   {datasource.id === 'google_workspace' && (
                     <>
-                      <p>"Show me my recent Google Docs"</p>
-                      <p>"List my spreadsheets"</p>
-                      <p>"What's on my calendar today?"</p>
+                      <button onClick={() => handleSampleQuestionClick('Show me my recent Google Docs')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me my recent Google Docs"</button>
+                      <button onClick={() => handleSampleQuestionClick('What\'s on my calendar today?')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"What's on my calendar today?"</button>
+                      <button onClick={() => handleSampleQuestionClick('Show me my recent emails')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me my recent emails"</button>
                     </>
                   )}
                   {datasource.id === 'jira' && (
                     <>
-                      <p>"Show me my open issues"</p>
-                      <p>"What's in the backlog?"</p>
+                      <button onClick={() => handleSampleQuestionClick('Show me my open issues')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me my open issues"</button>
+                      <button onClick={() => handleSampleQuestionClick('What\'s in the backlog?')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"What's in the backlog?"</button>
                     </>
                   )}
                   {datasource.id === 'github' && (
                     <>
-                      <p>"Show me my repositories"</p>
-                      <p>"List open pull requests"</p>
+                      <button onClick={() => handleSampleQuestionClick('Show me my repositories')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me my repositories"</button>
+                      <button onClick={() => handleSampleQuestionClick('List open pull requests')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"List open pull requests"</button>
                     </>
                   )}
                   {datasource.id === 'slack' && (
                     <>
-                      <p>"What channels do I have?"</p>
-                      <p>"Show team members"</p>
+                      <button onClick={() => handleSampleQuestionClick('What channels do I have?')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"What channels do I have?"</button>
+                      <button onClick={() => handleSampleQuestionClick('Show team members')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show team members"</button>
+                    </>
+                  )}
+                  {datasource.id === 'shopify' && (
+                    <>
+                      <button onClick={() => handleSampleQuestionClick('Show me recent orders')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"Show me recent orders"</button>
+                      <button onClick={() => handleSampleQuestionClick('List my products')} className="block w-full text-left text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded transition-colors cursor-pointer">"List my products"</button>
                     </>
                   )}
                 </div>

@@ -184,35 +184,46 @@ class TestSearchVsDMRouting:
 
 class TestContextualParameterExtraction:
     """Test that parameters can be correctly extracted from messages."""
-    
-    @pytest.fixture
-    def chat_service(self):
-        """Create a chat service instance for testing."""
-        service = ChatService.__new__(ChatService)
-        service.sessions = {}
-        return service
-    
-    def test_extract_bucket_name(self, chat_service):
+
+    def test_extract_bucket_name(self):
         """Test bucket name extraction from messages."""
+        from app.services.parameter_extractor import parameter_extractor
+
+        # Test pattern: "bucket: X"
         messages = [
-            {"role": "user", "content": "show me files in bideclaudetest"},
+            {"role": "user", "content": "bucket: bideclaudetest"},
             {"role": "assistant", "content": "Here are the files..."},
         ]
-        
-        bucket_name = chat_service._extract_bucket_name_from_messages(messages)
+        bucket_name = parameter_extractor.extract_bucket_name(messages)
         assert bucket_name == "bideclaudetest"
-    
-    def test_extract_table_name(self, chat_service):
+
+        # Test pattern: "contents of X"
+        messages2 = [
+            {"role": "user", "content": "show me contents of bideclaudetest"},
+        ]
+        bucket_name2 = parameter_extractor.extract_bucket_name(messages2)
+        assert bucket_name2 == "bideclaudetest"
+
+        # Test pattern: "in X bucket"
+        messages3 = [
+            {"role": "user", "content": "show me files in bideclaudetest bucket"},
+        ]
+        bucket_name3 = parameter_extractor.extract_bucket_name(messages3)
+        assert bucket_name3 == "bideclaudetest"
+
+    def test_extract_table_name(self):
         """Test table name extraction from messages."""
+        from app.services.parameter_extractor import parameter_extractor
+
         test_cases = [
             ({"role": "user", "content": "show me the users table"}, "users"),
             ({"role": "user", "content": "get latest orders"}, "orders"),
             ({"role": "user", "content": "describe products table structure"}, "products"),
         ]
-        
+
         for msg, expected_table in test_cases:
             messages = [msg]
-            table_name = chat_service._extract_table_name_from_messages(messages)
+            table_name = parameter_extractor.extract_table_name(messages)
             # Table extraction may vary, so we just check it's not None for valid queries
             assert table_name is not None or expected_table in ["orders"], \
                 f"Expected table extraction for: {msg['content']}"
@@ -286,3 +297,5 @@ class TestMultiToolQueries:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { DataSource } from '../types'
-import { datasourceApi } from '../services/api'
+import { datasourceApi, oauthApi, OAUTH_PROVIDERS, type OAuthConnectionStatus } from '../services/api'
 import DataSourceIcon from './DataSourceIcon'
 
 interface SettingsPanelProps {
@@ -9,6 +9,9 @@ interface SettingsPanelProps {
   onClose: () => void
   onSave: (datasource: string, credentials: Record<string, string>, testResult?: { success: boolean }) => void
   configuredDatasources: Set<string>
+  oauthConnections?: Map<string, OAuthConnectionStatus>
+  onOAuthConnect?: (provider: string) => void
+  onOAuthDisconnect?: (provider: string) => void
 }
 
 interface CredentialField {
@@ -249,6 +252,9 @@ export default function SettingsPanel({
   onClose,
   onSave,
   configuredDatasources,
+  oauthConnections = new Map(),
+  onOAuthConnect,
+  onOAuthDisconnect,
 }: SettingsPanelProps) {
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(
     datasources[0] || null
@@ -257,6 +263,8 @@ export default function SettingsPanel({
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({})
+  const [oauthLoading, setOauthLoading] = useState<Record<string, boolean>>({})
+  const [oauthError, setOauthError] = useState<string | null>(null)
 
   if (!isOpen) return null
 
@@ -364,8 +372,44 @@ export default function SettingsPanel({
   const handleClose = () => {
     setCredentials({})
     setErrors({})
+    setOauthError(null)
     onClose()
   }
+
+  // OAuth handlers
+  const handleOAuthConnect = async (provider: string) => {
+    setOauthLoading((prev) => ({ ...prev, [provider]: true }))
+    setOauthError(null)
+
+    try {
+      const { authorization_url } = await oauthApi.authorize(provider)
+      // Redirect to OAuth provider
+      window.location.href = authorization_url
+    } catch (error) {
+      setOauthError(error instanceof Error ? error.message : 'Failed to start OAuth flow')
+      setOauthLoading((prev) => ({ ...prev, [provider]: false }))
+    }
+  }
+
+  const handleOAuthDisconnect = async (provider: string) => {
+    setOauthLoading((prev) => ({ ...prev, [provider]: true }))
+    setOauthError(null)
+
+    try {
+      await oauthApi.disconnect(provider)
+      if (onOAuthDisconnect) {
+        onOAuthDisconnect(provider)
+      }
+    } catch (error) {
+      setOauthError(error instanceof Error ? error.message : 'Failed to disconnect')
+    } finally {
+      setOauthLoading((prev) => ({ ...prev, [provider]: false }))
+    }
+  }
+
+  // Check if current datasource uses OAuth
+  const isOAuthDatasource = selectedDatasource ? OAUTH_PROVIDERS.has(selectedDatasource.id) : false
+  const oauthStatus = selectedDatasource ? oauthConnections.get(selectedDatasource.id) : undefined
 
   const currentFields = selectedDatasource ? credentialFields[selectedDatasource.id] || [] : []
   const currentCredentials = selectedDatasource ? credentials[selectedDatasource.id] || {} : {}
@@ -453,178 +497,281 @@ export default function SettingsPanel({
 
               <div className="flex-1 overflow-y-auto p-6">
                 <div className="space-y-4 max-w-2xl">
-                  {currentFields.map((field) => (
-                    <div key={field.name}>
-                      <label
-                        htmlFor={field.name}
-                        className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
-                      >
-                        {field.label}
-                        {field.required && <span className="text-red-500 ml-1">*</span>}
-                      </label>
-                      <input
-                        type={field.type}
-                        id={field.name}
-                        value={currentCredentials[field.name] || ''}
-                        onChange={(e) =>
-                          handleChange(selectedDatasource.id, field.name, e.target.value)
-                        }
-                        placeholder={field.placeholder}
-                        className={`w-full px-4 py-2 bg-gray-50 dark:bg-gray-900 border ${
-                          errors[`${selectedDatasource.id}_${field.name}`]
-                            ? 'border-red-500 dark:border-red-500'
-                            : 'border-gray-300 dark:border-gray-600'
-                        } rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white transition-colors`}
-                      />
-                      {errors[`${selectedDatasource.id}_${field.name}`] && (
-                        <p className="text-red-500 text-sm mt-1">
-                          {errors[`${selectedDatasource.id}_${field.name}`]}
-                        </p>
+                  {/* OAuth UI for OAuth providers */}
+                  {isOAuthDatasource ? (
+                    <div className="space-y-6">
+                      {/* Connection Status */}
+                      {oauthStatus?.connected ? (
+                        <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-6">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-4">
+                              <div className="w-12 h-12 bg-green-100 dark:bg-green-800 rounded-full flex items-center justify-center">
+                                <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                              </div>
+                              <div>
+                                <p className="font-medium text-green-900 dark:text-green-100">Connected</p>
+                                {oauthStatus.provider_email && (
+                                  <p className="text-sm text-green-700 dark:text-green-300">{oauthStatus.provider_email}</p>
+                                )}
+                                {oauthStatus.needs_refresh && (
+                                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">Token needs refresh</p>
+                                )}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleOAuthDisconnect(selectedDatasource.id)}
+                              disabled={oauthLoading[selectedDatasource.id]}
+                              className="px-4 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors text-sm font-medium"
+                            >
+                              {oauthLoading[selectedDatasource.id] ? 'Disconnecting...' : 'Disconnect'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-8 text-center">
+                          <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <DataSourceIcon datasourceId={selectedDatasource.id} size={32} />
+                          </div>
+                          <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
+                            Connect to {selectedDatasource.name}
+                          </h4>
+                          <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+                            Click the button below to securely connect your {selectedDatasource.name} account using OAuth.
+                          </p>
+                          <button
+                            onClick={() => handleOAuthConnect(selectedDatasource.id)}
+                            disabled={oauthLoading[selectedDatasource.id]}
+                            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-sm hover:shadow-md font-medium inline-flex items-center space-x-2"
+                          >
+                            {oauthLoading[selectedDatasource.id] ? (
+                              <>
+                                <svg className="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                                <span>Connecting...</span>
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                                </svg>
+                                <span>Connect to {selectedDatasource.name}</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
                       )}
-                    </div>
-                  ))}
 
-                  {/* Test Result */}
-                  {testResult && (
-                    <div
-                      className={`rounded-lg p-4 mt-6 ${
-                        testResult.success
-                          ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
-                          : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
-                      }`}
-                    >
-                      <div className="flex items-start space-x-3">
-                        {testResult.success ? (
-                          <svg
-                            className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                            />
+                      {/* OAuth Error */}
+                      {oauthError && (
+                        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                          <div className="flex items-start space-x-3">
+                            <svg className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <p className="text-sm text-red-900 dark:text-red-200">{oauthError}</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* OAuth Info */}
+                      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+                        <div className="flex items-start space-x-3">
+                          <svg className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                           </svg>
-                        ) : (
-                          <svg
-                            className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
+                          <div className="text-sm text-blue-900 dark:text-blue-200">
+                            <p className="font-medium mb-1">Secure OAuth Connection</p>
+                            <p>
+                              You will be redirected to {selectedDatasource.name} to authorize access.
+                              Your login credentials are never shared with us - we only receive a secure access token.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Manual Credentials Form for non-OAuth providers */
+                    <>
+                      {currentFields.map((field) => (
+                        <div key={field.name}>
+                          <label
+                            htmlFor={field.name}
+                            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
                           >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
-                            />
-                          </svg>
-                        )}
+                            {field.label}
+                            {field.required && <span className="text-red-500 ml-1">*</span>}
+                          </label>
+                          <input
+                            type={field.type}
+                            id={field.name}
+                            value={currentCredentials[field.name] || ''}
+                            onChange={(e) =>
+                              handleChange(selectedDatasource.id, field.name, e.target.value)
+                            }
+                            placeholder={field.placeholder}
+                            className={`w-full px-4 py-2 bg-gray-50 dark:bg-gray-900 border ${
+                              errors[`${selectedDatasource.id}_${field.name}`]
+                                ? 'border-red-500 dark:border-red-500'
+                                : 'border-gray-300 dark:border-gray-600'
+                            } rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white transition-colors`}
+                          />
+                          {errors[`${selectedDatasource.id}_${field.name}`] && (
+                            <p className="text-red-500 text-sm mt-1">
+                              {errors[`${selectedDatasource.id}_${field.name}`]}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+
+                      {/* Test Result */}
+                      {testResult && (
                         <div
-                          className={`text-sm ${
+                          className={`rounded-lg p-4 mt-6 ${
                             testResult.success
-                              ? 'text-green-900 dark:text-green-200'
-                              : 'text-red-900 dark:text-red-200'
+                              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+                              : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
                           }`}
                         >
-                          <p className="font-medium mb-1">
-                            {testResult.success ? 'Connection Successful' : 'Connection Failed'}
-                          </p>
-                          <p>{testResult.message}</p>
+                          <div className="flex items-start space-x-3">
+                            {testResult.success ? (
+                              <svg
+                                className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                />
+                              </svg>
+                            ) : (
+                              <svg
+                                className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                />
+                              </svg>
+                            )}
+                            <div
+                              className={`text-sm ${
+                                testResult.success
+                                  ? 'text-green-900 dark:text-green-200'
+                                  : 'text-red-900 dark:text-red-200'
+                              }`}
+                            >
+                              <p className="font-medium mb-1">
+                                {testResult.success ? 'Connection Successful' : 'Connection Failed'}
+                              </p>
+                              <p>{testResult.message}</p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Credential Instructions */}
+                      {credentialInstructions[selectedDatasource.id] && (
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mt-6">
+                          <div className="flex items-start space-x-3">
+                            <svg
+                              className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+                              />
+                            </svg>
+                            <div className="text-sm text-amber-900 dark:text-amber-200">
+                              <p className="font-medium mb-2">{credentialInstructions[selectedDatasource.id].title}</p>
+                              <ol className="list-decimal list-inside space-y-1">
+                                {credentialInstructions[selectedDatasource.id].steps.map((step, index) => (
+                                  <li key={index} className="text-amber-800 dark:text-amber-300">{step}</li>
+                                ))}
+                              </ol>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
+                        <div className="flex items-start space-x-3">
+                          <svg
+                            className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                          <div className="text-sm text-blue-900 dark:text-blue-200">
+                            <p className="font-medium mb-1">Secure Storage</p>
+                            <p>
+                              Your credentials are encrypted and stored securely in the database.
+                              They persist across sessions and you only need to enter them once per datasource.
+                            </p>
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    </>
                   )}
+                </div>
+              </div>
 
-                  {/* Credential Instructions */}
-                  {credentialInstructions[selectedDatasource.id] && (
-                    <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mt-6">
-                      <div className="flex items-start space-x-3">
-                        <svg
-                          className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
-                          />
-                        </svg>
-                        <div className="text-sm text-amber-900 dark:text-amber-200">
-                          <p className="font-medium mb-2">{credentialInstructions[selectedDatasource.id].title}</p>
-                          <ol className="list-decimal list-inside space-y-1">
-                            {credentialInstructions[selectedDatasource.id].steps.map((step, index) => (
-                              <li key={index} className="text-amber-800 dark:text-amber-300">{step}</li>
-                            ))}
-                          </ol>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
-                    <div className="flex items-start space-x-3">
-                      <svg
-                        className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                        />
-                      </svg>
-                      <div className="text-sm text-blue-900 dark:text-blue-200">
-                        <p className="font-medium mb-1">Secure Storage</p>
-                        <p>
-                          Your credentials are encrypted and stored securely in the database.
-                          They persist across sessions and you only need to enter them once per datasource.
-                        </p>
-                      </div>
-                    </div>
+              {/* Footer - only show Save button for non-OAuth providers */}
+              {!isOAuthDatasource && (
+                <div className="p-6 border-t border-gray-200 dark:border-gray-700">
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => handleSave(selectedDatasource.id)}
+                      disabled={isTesting}
+                      className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-sm hover:shadow-md flex items-center space-x-2"
+                    >
+                      {isTesting ? (
+                        <>
+                          <svg
+                            className="w-5 h-5 animate-spin"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                            />
+                          </svg>
+                          <span>Testing Connection...</span>
+                        </>
+                      ) : (
+                        <span>Save & Test Connection</span>
+                      )}
+                    </button>
                   </div>
                 </div>
-              </div>
-
-              <div className="p-6 border-t border-gray-200 dark:border-gray-700">
-                <div className="flex justify-end">
-                  <button
-                    onClick={() => handleSave(selectedDatasource.id)}
-                    disabled={isTesting}
-                    className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-sm hover:shadow-md flex items-center space-x-2"
-                  >
-                    {isTesting ? (
-                      <>
-                        <svg
-                          className="w-5 h-5 animate-spin"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                          />
-                        </svg>
-                        <span>Testing Connection...</span>
-                      </>
-                    ) : (
-                      <span>Save & Test Connection</span>
-                    )}
-                  </button>
-                </div>
-              </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">

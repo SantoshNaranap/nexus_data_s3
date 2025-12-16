@@ -560,7 +560,29 @@ def get_credentials(
     Returns:
         Valid Credentials object or None.
     """
-    # First, try OAuth 2.1 session store if we have a session_id (FastMCP session)
+    # FIRST: Check for environment variable tokens (for multi-tenant apps that manage their own OAuth)
+    env_access_token = os.getenv("GOOGLE_ACCESS_TOKEN")
+    env_refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+    if env_access_token:
+        logger.info("[get_credentials] Using OAuth tokens from environment variables")
+        try:
+            credentials = Credentials(
+                token=env_access_token,
+                refresh_token=env_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+                client_secret=os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+                scopes=required_scopes,
+            )
+            # Mark as valid since we just got it from our app's OAuth flow
+            if credentials.token:
+                logger.info(f"[get_credentials] Created credentials from env vars for {user_google_email or 'unknown user'}")
+                return credentials
+        except Exception as e:
+            logger.warning(f"[get_credentials] Failed to create credentials from env vars: {e}")
+            # Fall through to other methods
+
+    # Next, try OAuth 2.1 session store if we have a session_id (FastMCP session)
     if session_id:
         try:
             store = get_oauth21_session_store()

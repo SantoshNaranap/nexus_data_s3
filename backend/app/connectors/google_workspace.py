@@ -9,6 +9,7 @@ Provides MCP tools for interacting with Google Workspace:
 """
 
 from typing import Dict, List, Optional, Any
+import json
 
 from .base import BaseConnector, ConnectorMetadata, CredentialField
 
@@ -142,22 +143,70 @@ GOOGLE WORKSPACE TOOLS - COMPREHENSIVE GUIDE:
 """
 
     def get_direct_routing(self, message: str) -> Optional[List[Dict[str, Any]]]:
-        """Direct routing for common Google Workspace queries."""
+        """Direct routing for simple Google Workspace queries only.
+
+        For queries that need search terms (like 'find documents about X'),
+        we return None to let Claude extract and pass the proper query parameters.
+        """
         message_lower = message.lower().strip()
 
-        # Calendar
-        if any(kw in message_lower for kw in ["calendar", "event", "meeting", "schedule"]):
+        # Only route very simple calendar queries - let Claude handle specific searches
+        if message_lower in ["what's on my calendar today", "my calendar today", "calendar today",
+                             "today's meetings", "meetings today", "my meetings"]:
             return [{"tool": "get_events", "args": {}}]
 
-        # Email
-        if any(kw in message_lower for kw in ["email", "mail", "inbox", "gmail"]):
-            return [{"tool": "list_messages", "args": {}}]
-
-        # Drive/Files
-        if any(kw in message_lower for kw in ["drive", "file", "doc", "sheet", "document"]):
-            return [{"tool": "search_drive_files", "args": {}}]
-
+        # All other queries (email searches, drive searches, etc.) should go through Claude
+        # so it can extract the proper search terms
         return None
+
+    def get_env_from_oauth_tokens(self, tokens: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Convert OAuth tokens to environment variables for Google Workspace.
+
+        The Google Workspace MCP server expects these environment variables
+        for OAuth authentication.
+
+        Args:
+            tokens: Dict containing:
+                - access_token: Google OAuth access token
+                - refresh_token: Google OAuth refresh token
+                - provider_email: User's Google email
+                - scopes: List of granted OAuth scopes
+
+        Returns:
+            Dict of environment variables for the MCP server
+        """
+        env = {}
+
+        # Pass OAuth tokens to the MCP server
+        if tokens.get("access_token"):
+            env["GOOGLE_ACCESS_TOKEN"] = tokens["access_token"]
+
+        if tokens.get("refresh_token"):
+            env["GOOGLE_REFRESH_TOKEN"] = tokens["refresh_token"]
+
+        if tokens.get("provider_email"):
+            env["USER_GOOGLE_EMAIL"] = tokens["provider_email"]
+
+        # Pass scopes as JSON array
+        if tokens.get("scopes"):
+            scopes = tokens["scopes"]
+            if isinstance(scopes, list):
+                env["GOOGLE_OAUTH_SCOPES"] = json.dumps(scopes)
+            elif isinstance(scopes, str):
+                env["GOOGLE_OAUTH_SCOPES"] = scopes
+
+        # Also pass client credentials (needed for token refresh)
+        try:
+            from app.core.config import settings
+            if settings.google_oauth_client_id:
+                env["GOOGLE_OAUTH_CLIENT_ID"] = settings.google_oauth_client_id
+            if settings.google_oauth_client_secret:
+                env["GOOGLE_OAUTH_CLIENT_SECRET"] = settings.google_oauth_client_secret
+        except ImportError:
+            pass
+
+        return env
 
 
 # Export singleton instance
