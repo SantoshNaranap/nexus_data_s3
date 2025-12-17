@@ -115,6 +115,7 @@ async def signup(
     response.set_cookie(
         key="access_token",
         value=access_token,
+        path="/",  # Explicit path for consistent cookie handling
         httponly=cookie_settings["httponly"],
         secure=cookie_settings["secure"],
         samesite=cookie_settings["samesite"],
@@ -189,6 +190,7 @@ async def login(
     response.set_cookie(
         key="access_token",
         value=access_token,
+        path="/",  # Explicit path for consistent cookie handling
         httponly=cookie_settings["httponly"],
         secure=cookie_settings["secure"],
         samesite=cookie_settings["samesite"],
@@ -233,8 +235,16 @@ async def logout(response: Response):
     Logout user by clearing authentication cookie.
     """
     response = JSONResponse(content={"message": "Logged out successfully"})
-    response.delete_cookie(key="access_token")
-    logger.info("User logged out")
+    # Must use same cookie settings as set_cookie for proper deletion
+    cookie_settings = settings.cookie_settings
+    response.delete_cookie(
+        key="access_token",
+        path="/",  # Ensure cookie is deleted for all paths
+        httponly=cookie_settings["httponly"],
+        secure=cookie_settings["secure"],
+        samesite=cookie_settings["samesite"],
+    )
+    logger.info("User logged out, access_token cookie cleared")
     return response
 
 

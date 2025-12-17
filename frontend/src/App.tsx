@@ -31,9 +31,10 @@ function AppContent() {
 
   // Fetch OAuth connections for all providers
   const fetchOAuthConnections = useCallback(async () => {
-    if (!isAuthenticated) return
+    if (!isAuthenticated || !user) return
 
     try {
+      console.log(`[App] Fetching OAuth connections for user: ${user.email}`)
       const connections = await oauthApi.getConnections()
       const connectionMap = new Map<string, OAuthConnectionStatus>()
 
@@ -58,11 +59,11 @@ function AppContent() {
         return updated
       })
 
-      console.log('[App] OAuth connections loaded:', Array.from(connectionMap.keys()))
+      console.log(`[App] OAuth connections loaded for ${user.email}:`, Array.from(connectionMap.keys()))
     } catch (error) {
       console.error('[App] Failed to fetch OAuth connections:', error)
     }
-  }, [isAuthenticated])
+  }, [isAuthenticated, user])
 
   // Handle OAuth callback URL parameters
   useEffect(() => {
@@ -97,10 +98,19 @@ function AppContent() {
   }, [fetchOAuthConnections])
 
   // Check which datasources already have credentials saved
+  // Clear configured datasources when user changes (important for credential isolation!)
+  useEffect(() => {
+    // When user changes (login/logout/switch), reset credential state
+    console.log(`[App] User changed to: ${user?.email || 'none'}, clearing credential state`)
+    setConfiguredDatasources(new Set())
+    setOauthConnections(new Map())
+  }, [user?.id])
+
   useEffect(() => {
     async function checkExistingCredentials() {
-      if (!datasources || !isAuthenticated) return
+      if (!datasources || !isAuthenticated || !user) return
 
+      console.log(`[App] Checking credentials for user: ${user.email}`)
       const configured = new Set<string>()
 
       // Check each datasource for existing credentials
@@ -110,7 +120,7 @@ function AppContent() {
             const status = await credentialsApi.checkStatus(ds.id)
             if (status.configured) {
               configured.add(ds.id)
-              console.log(`[App] ${ds.id} already configured`)
+              console.log(`[App] ${ds.id} already configured for ${user.email}`)
             }
           } catch (error) {
             console.error(`[App] Failed to check ${ds.id} credentials:`, error)
@@ -119,11 +129,11 @@ function AppContent() {
       )
 
       setConfiguredDatasources(configured)
-      console.log('[App] Configured datasources:', Array.from(configured))
+      console.log(`[App] Configured datasources for ${user.email}:`, Array.from(configured))
     }
 
     checkExistingCredentials()
-  }, [datasources, isAuthenticated])
+  }, [datasources, isAuthenticated, user?.id])
 
   const handleSelectDatasource = (datasource: DataSource) => {
     setSelectedDatasource(datasource)

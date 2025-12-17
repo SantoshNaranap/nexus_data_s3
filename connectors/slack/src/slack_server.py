@@ -27,6 +27,10 @@ _executor = ThreadPoolExecutor(max_workers=20)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("slack-mcp-server")
 
+# Cache for recent DM partners (for context-aware name resolution)
+_recent_dm_partners: List[Dict[str, Any]] = []
+_dm_cache_timestamp: Optional[datetime] = None
+
 # Initialize Slack clients
 # Bot token (xoxb-) - for channels, sending messages, listing users
 bot_token = os.getenv("SLACK_BOT_TOKEN", "")
@@ -216,8 +220,111 @@ def _get_channel_id(channel_name: str) -> Optional[str]:
     return None
 
 
+def _get_recent_dm_partners() -> List[Dict[str, Any]]:
+    """Get list of recent DM conversation partners, sorted by most recent first.
+
+    This is used for context-aware name resolution - if user asks about "Suresh",
+    we check if they have a recent DM with someone named Suresh and prioritize that person.
+
+    Returns list of dicts with: user_id, user_name, last_message_time
+    """
+    global _recent_dm_partners, _dm_cache_timestamp
+
+    # Cache for 5 minutes
+    if _dm_cache_timestamp and (datetime.now() - _dm_cache_timestamp).seconds < 300:
+        return _recent_dm_partners
+
+    client = _get_client_for_operation("dm")
+    if not client:
+        return []
+
+    try:
+        # Get recent DM conversations
+        result = client.conversations_list(types="im", limit=50)
+        dm_channels = result.get("channels", [])
+
+        partners = []
+        for dm in dm_channels:
+            user_id = dm.get("user")
+            if not user_id:
+                continue
+
+            # Get last message timestamp
+            try:
+                history = client.conversations_history(channel=dm["id"], limit=1)
+                messages = history.get("messages", [])
+                last_ts = float(messages[0]["ts"]) if messages else 0
+            except:
+                last_ts = 0
+
+            user_name = _get_user_name(user_id)
+            partners.append({
+                "user_id": user_id,
+                "user_name": user_name,
+                "last_message_ts": last_ts,
+            })
+
+        # Sort by most recent
+        partners.sort(key=lambda x: x["last_message_ts"], reverse=True)
+
+        _recent_dm_partners = partners
+        _dm_cache_timestamp = datetime.now()
+        logger.info(f"Cached {len(partners)} recent DM partners for context-aware resolution")
+
+        return partners
+
+    except SlackApiError as e:
+        logger.warning(f"Could not fetch DM partners for context: {e}")
+        return []
+
+
+def _resolve_user_with_context(user_identifier: str) -> Optional[str]:
+    """Smart user resolution that uses DM history for context.
+
+    When multiple users match (e.g., multiple "Suresh"), this prioritizes:
+    1. Users you've recently DMed with
+    2. Exact name matches
+    3. Fuzzy matches
+
+    This makes queries like "What did Suresh say to me?" work naturally
+    by defaulting to the Suresh you actually talk to.
+    """
+    # First, try basic resolution
+    result = _get_user_id(user_identifier)
+
+    # If unambiguous, return as-is
+    if result and not result.startswith("AMBIGUOUS:"):
+        return result
+
+    # If ambiguous, try to resolve using DM context
+    if result and result.startswith("AMBIGUOUS:"):
+        candidates_str = result.replace("AMBIGUOUS:", "")
+
+        # Get recent DM partners
+        dm_partners = _get_recent_dm_partners()
+        dm_user_ids = {p["user_id"] for p in dm_partners}
+        dm_user_names = {p["user_name"].lower() for p in dm_partners}
+
+        search_lower = user_identifier.lower()
+
+        # Check if any DM partner matches the search term
+        for partner in dm_partners:
+            partner_name_lower = partner["user_name"].lower()
+            if (search_lower in partner_name_lower or
+                partner_name_lower.startswith(search_lower) or
+                search_lower == partner_name_lower.split()[0]):  # First name match
+                logger.info(f"Context-resolved '{user_identifier}' to '{partner['user_name']}' (recent DM partner)")
+                return partner["user_id"]
+
+        # No DM context match, return the ambiguous result for clarification
+        return result
+
+    # Not found
+    return result
+
+
 def _get_user_id(user_identifier: str) -> Optional[str]:
-    """Get user ID from name/email, with caching and fuzzy matching.
+    """Get user ID from name/email, with caching and robust fuzzy matching.
 
     Supports:
     - Exact username match
@@ -225,9 +332,13 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
     - Exact real name match (case-insensitive)
     - Partial name match (first name, last name, or partial)
     - Display name match
+    - Substring match (finds "Swati" in "Swati Sharma")
 
     Returns user_id or None. For ambiguous matches, returns special
     "AMBIGUOUS:name1|name2|name3" string that handlers can detect.
+    When no match found, returns "NOT_FOUND:suggestions" with similar names.
+
+    Note: For context-aware resolution (using DM history), use _resolve_user_with_context() instead.
     """
     if user_identifier.startswith("U"):
         return user_identifier  # Already an ID
@@ -276,11 +387,13 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             if not cursor:
                 break
 
-        logger.info(f"🔍 Loaded {len(all_members)} users for lookup")
+        logger.info(f"🔍 Loaded {len(all_members)} users for lookup of '{user_identifier}'")
 
-        # First pass: look for exact matches and build cache
-        exact_match = None
+        # First pass: look for ALL matches (exact AND partial) to detect ambiguity
+        exact_matches = []  # Now a list to handle multiple exact matches
         partial_matches = []
+        substring_matches = []  # Lower priority - substring anywhere in name
+        all_active_users = []  # For suggestions if no match
 
         for user in all_members:
             # Skip deleted users and bots
@@ -294,6 +407,13 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             email = profile.get("email", "")
             display_name = profile.get("display_name", "")
 
+            # Store all users for potential suggestions
+            all_active_users.append({
+                "id": user_id,
+                "name": real_name or display_name or username,
+                "email": email
+            })
+
             # Cache all variations
             if username:
                 _user_cache[username] = user_id
@@ -306,15 +426,16 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             if display_name:
                 _user_cache[display_name.lower()] = user_id
 
-            # Check for exact matches
+            # Check for exact matches - but DON'T short-circuit, collect all!
             if username == user_identifier or \
                username.lower() == search_lower or \
                email == user_identifier or \
                email.lower() == search_lower or \
                real_name.lower() == search_lower or \
                display_name.lower() == search_lower:
-                exact_match = user_id
-                continue
+                exact_matches.append((user_id, real_name or display_name or username, email))
+                logger.info(f"✅ Exact match found: '{user_identifier}' -> '{real_name or username}' ({user_id})")
+                # Don't continue - still check for partial matches to detect other "Dinesh" users
 
             # Check for partial matches (first name, last name, or contains)
             real_name_lower = real_name.lower()
@@ -332,46 +453,117 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
             # Priority 3: Any name part exact match (middle names)
             elif search_lower in name_parts:
                 partial_matches.append((user_id, real_name, email, "name_part"))
-            # Priority 4: Partial/substring match - LOWER priority (avoids "Akash" matching "Omprakash")
-            # Only include if the search term is at word boundary
+            # Priority 4: Partial/substring match at word boundary
             elif real_name_lower.startswith(search_lower + " ") or (" " + search_lower) in real_name_lower:
                 partial_matches.append((user_id, real_name, email, "partial"))
             elif display_name_lower.startswith(search_lower) or display_name_lower == search_lower:
                 partial_matches.append((user_id, display_name, email, "display"))
             elif username.lower().startswith(search_lower):
                 partial_matches.append((user_id, username, email, "username"))
+            # Priority 5 (NEW): Substring match ANYWHERE in name (catches "Swati" in "Swati Sharma")
+            elif search_lower in real_name_lower or search_lower in display_name_lower:
+                substring_matches.append((user_id, real_name or display_name, email, "substring"))
+            elif search_lower in username.lower():
+                substring_matches.append((user_id, username, email, "substring_username"))
 
-        # Return exact match if found
-        if exact_match:
-            return exact_match
+        # Combine exact and partial matches to detect ALL possible users
+        # Normalize partial_matches format (4 elements) to match exact_matches (3 elements)
+        all_matches = exact_matches + [(m[0], m[1], m[2]) for m in partial_matches]
 
-        # Handle partial matches
+        # Return exact match if found AND it's the only one
+        if len(exact_matches) == 1 and len(partial_matches) == 0:
+            logger.info(f"✅ Single exact match: '{user_identifier}' -> '{exact_matches[0][1]}'")
+            return exact_matches[0][0]
+
+        # If multiple exact matches or exact+partial, it's ambiguous
+        if len(exact_matches) > 1 or (len(exact_matches) >= 1 and len(partial_matches) >= 1):
+            # Dedupe by user_id
+            seen_ids = set()
+            unique_matches = []
+            for match in all_matches:
+                if match[0] not in seen_ids:
+                    seen_ids.add(match[0])
+                    unique_matches.append(match)
+
+            if len(unique_matches) > 1:
+                candidates = []
+                for user_id, name, email in unique_matches[:5]:
+                    if email:
+                        candidates.append(f"{name} ({email})")
+                    else:
+                        candidates.append(name)
+                logger.info(f"⚠️ Multiple matches for '{user_identifier}': {candidates}")
+                return f"AMBIGUOUS:{' | '.join(candidates)}"
+            elif len(unique_matches) == 1:
+                return unique_matches[0][0]
+
+        # Handle partial matches only (no exact)
         if partial_matches:
             # If only one match, return it
             if len(partial_matches) == 1:
                 best_match = partial_matches[0]
-                logger.info(f"Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+                logger.info(f"✅ Fuzzy matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
                 return best_match[0]
 
             # Check if there's a clear first_name match - prefer that over ambiguity
             first_name_matches = [m for m in partial_matches if m[3] == "first_name"]
             if len(first_name_matches) == 1:
                 best_match = first_name_matches[0]
-                logger.info(f"First name matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+                logger.info(f"✅ First name matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
                 return best_match[0]
 
             # Multiple matches - return special ambiguous marker
-            # Format: AMBIGUOUS:name1 (email1)|name2 (email2)|...
             candidates = []
-            for match in partial_matches[:5]:  # Limit to 5 candidates
+            for match in partial_matches[:5]:
                 user_id, name, email, match_type = match
                 if email:
                     candidates.append(f"{name} ({email})")
                 else:
                     candidates.append(name)
 
-            logger.info(f"Ambiguous match for '{user_identifier}': {candidates}")
+            logger.info(f"⚠️ Ambiguous match for '{user_identifier}': {candidates}")
             return f"AMBIGUOUS:{' | '.join(candidates)}"
+
+        # Fallback to substring matches (less confident, but better than nothing)
+        if substring_matches:
+            if len(substring_matches) == 1:
+                best_match = substring_matches[0]
+                logger.info(f"✅ Substring matched '{user_identifier}' to '{best_match[1]}' (user_id: {best_match[0]})")
+                return best_match[0]
+
+            # Multiple substring matches - return as ambiguous
+            candidates = []
+            for match in substring_matches[:5]:
+                user_id, name, email, match_type = match
+                if email:
+                    candidates.append(f"{name} ({email})")
+                else:
+                    candidates.append(name)
+
+            logger.info(f"⚠️ Multiple substring matches for '{user_identifier}': {candidates}")
+            return f"AMBIGUOUS:{' | '.join(candidates)}"
+
+        # No match found - find similar names to suggest
+        logger.warning(f"❌ No match found for '{user_identifier}' among {len(all_active_users)} users")
+
+        # Find names that might be similar (start with same letter, contain similar substrings)
+        suggestions = []
+        search_first_letter = search_lower[0] if search_lower else ""
+        search_first_two = search_lower[:2] if len(search_lower) >= 2 else search_lower
+
+        for u in all_active_users:
+            name_lower = u["name"].lower()
+            # Suggest names starting with same letters
+            if name_lower.startswith(search_first_two):
+                suggestions.append(u["name"])
+            elif name_lower.startswith(search_first_letter) and len(suggestions) < 10:
+                suggestions.append(u["name"])
+
+        if suggestions:
+            suggestions = suggestions[:5]  # Limit to 5
+            return f"NOT_FOUND:{user_identifier}|SUGGESTIONS:{','.join(suggestions)}"
+
+        return f"NOT_FOUND:{user_identifier}|NO_SIMILAR_USERS"
 
     except SlackApiError as e:
         logger.error(f"Error looking up user: {e}")
@@ -380,12 +572,29 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
 
 
 def _check_ambiguous_user(user_id_result: Optional[str], user_query: str) -> tuple[bool, Optional[str], Optional[str]]:
-    """Check if user lookup result is ambiguous.
+    """Check if user lookup result is ambiguous or not found.
 
     Returns: (is_ambiguous, user_id_or_none, error_message_or_none)
+
+    Error message formats:
+    - For ambiguous: "Multiple users match 'X'. Did you mean: A, B, C?"
+    - For not found with suggestions: "User 'X' not found. Similar names: A, B, C"
+    - For not found without suggestions: "User 'X' not found in this workspace."
     """
     if user_id_result is None:
-        return False, None, f"User not found: {user_query}. Try using their full name or email."
+        return False, None, f"User '{user_query}' not found in this workspace. Try using their full name or email address."
+
+    if user_id_result.startswith("NOT_FOUND:"):
+        # Parse the NOT_FOUND response
+        parts = user_id_result.replace("NOT_FOUND:", "")
+        if "|SUGGESTIONS:" in parts:
+            search_term, suggestions = parts.split("|SUGGESTIONS:")
+            return False, None, f"User '{search_term}' not found. Similar names in workspace: {suggestions.replace(',', ', ')}"
+        elif "|NO_SIMILAR_USERS" in parts:
+            search_term = parts.replace("|NO_SIMILAR_USERS", "")
+            return False, None, f"User '{search_term}' not found in this workspace. No similar names found."
+        else:
+            return False, None, f"User '{user_query}' not found in this workspace."
 
     if user_id_result.startswith("AMBIGUOUS:"):
         candidates = user_id_result.replace("AMBIGUOUS:", "")
@@ -820,6 +1029,71 @@ Returns message count, active users, and key discussion topics.""",
             },
         ),
         Tool(
+            name="ask_about_person",
+            description="""THE PRIMARY TOOL for ANY question about a person in Slack.
+
+USE THIS FOR ANY QUERY MENTIONING A PERSON'S NAME:
+- "What is Chandru doing?"
+- "What did Suresh say to me?"
+- "When did John last message?"
+- "What project is Sarah working on?"
+- "Show me Austin's recent activity"
+- "What has [anyone] been up to?"
+
+This tool:
+1. Uses SMART NAME RESOLUTION - if you ask about "Suresh" and you have a recent DM with a Suresh, it picks THAT Suresh automatically
+2. Searches their messages across ALL channels
+3. Checks your DM history with them
+4. Returns their recent activity and online status
+
+Just pass the person's name - it handles everything else.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person's name (first name, full name, or email)",
+                    },
+                    "question_type": {
+                        "type": "string",
+                        "enum": ["activity", "dm_history", "last_message", "profile", "all"],
+                        "description": "What to look up: 'activity' (their messages), 'dm_history' (your DMs with them), 'last_message' (most recent), 'profile' (info), 'all' (everything)",
+                        "default": "all",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Look back this many days (default: 7)",
+                        "default": 7,
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="get_user_activity",
+            description="""Get a user's recent messages across all channels. Consider using ask_about_person instead for more comprehensive results.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "string",
+                        "description": "User name, first name, email, or ID",
+                    },
+                    "days_ago": {
+                        "type": "integer",
+                        "description": "Search messages from the last N days (default: 7)",
+                        "default": 7,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default: 30)",
+                        "default": 30,
+                    },
+                },
+                "required": ["user"],
+            },
+        ),
+        Tool(
             name="get_all_recent_messages",
             description="""Get ALL your recent messages across ALL DMs and channels.
 
@@ -901,6 +1175,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return await handle_search_in_dms(arguments)
         elif name == "get_channel_activity":
             return await handle_get_channel_activity(arguments)
+        elif name == "ask_about_person":
+            return await handle_ask_about_person(arguments)
+        elif name == "get_user_activity":
+            return await handle_get_user_activity(arguments)
         elif name == "get_all_recent_messages":
             return await handle_get_all_recent_messages(arguments)
         else:
@@ -924,26 +1202,52 @@ async def handle_list_channels(arguments: dict) -> list[TextContent]:
     if include_private:
         types += ",private_channel"
 
-    # Use user token with users_conversations to get private channels
-    # This returns channels the user is a member of (including private)
-    client = _get_client_for_operation("dm")  # user token preferred
+    # Use conversations.list which returns num_members (users_conversations doesn't)
+    client = _get_client_for_operation("channels")
 
-    try:
-        # users_conversations gets channels the authenticated user is in
-        result = client.users_conversations(types=types, limit=limit, exclude_archived=False)
-    except SlackApiError:
-        # Fallback to conversations_list if users_conversations fails
-        result = client.conversations_list(types=types, limit=limit)
+    all_channels = []
+    cursor = None
+
+    # Paginate to get all channels up to the limit
+    while len(all_channels) < limit:
+        try:
+            if cursor:
+                result = client.conversations_list(
+                    types=types,
+                    limit=min(200, limit - len(all_channels)),
+                    cursor=cursor,
+                    exclude_archived=True
+                )
+            else:
+                result = client.conversations_list(
+                    types=types,
+                    limit=min(200, limit),
+                    exclude_archived=True
+                )
+
+            all_channels.extend(result.get("channels", []))
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+
+            if not cursor:
+                break
+
+        except SlackApiError as e:
+            logger.error(f"Error listing channels: {e}")
+            break
 
     channels = []
-    for channel in result["channels"]:
+    for channel in all_channels[:limit]:
+        name = channel["name"]
+        is_private = channel.get("is_private", False)
+        # Format name with lock for private channels
+        display_name = f"[private] #{name}" if is_private else f"#{name}"
+
         channels.append({
             "id": channel["id"],
-            "name": channel["name"],
-            "is_private": channel.get("is_private", False),
-            "num_members": channel.get("num_members", 0),
-            "topic": channel.get("topic", {}).get("value", ""),
-            "purpose": channel.get("purpose", {}).get("value", ""),
+            "name": display_name,
+            "is_private": is_private,
+            "topic": channel.get("topic", {}).get("value", "")[:80] if channel.get("topic", {}).get("value") else "",
+            "purpose": channel.get("purpose", {}).get("value", "")[:80] if channel.get("purpose", {}).get("value") else "",
         })
 
     response = {
@@ -1628,6 +1932,233 @@ async def handle_get_channel_activity(arguments: dict) -> list[TextContent]:
     }
 
     return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_ask_about_person(arguments: dict) -> list[TextContent]:
+    """THE PRIMARY unified handler for any question about a person in Slack.
+
+    Uses context-aware name resolution - if user asks about "Suresh" and they have
+    a recent DM with someone named Suresh, it automatically picks THAT Suresh.
+
+    Combines: activity search, DM history, profile info, and presence status.
+    """
+    person = arguments["person"]
+    question_type = arguments.get("question_type", "all")
+    days = arguments.get("days", 7)
+
+    logger.info(f"ask_about_person: person='{person}', type='{question_type}', days={days}")
+
+    # Use context-aware resolution (prioritizes recent DM partners)
+    user_id_result = _resolve_user_with_context(person)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, person)
+
+    if error_msg:
+        return [TextContent(type="text", text=json.dumps({
+            "error": error_msg,
+            "query": person,
+            "suggestion": "Try using the person's full name or email address.",
+            "hint": "If you recently DMed this person, their name should resolve automatically."
+        }, indent=2))]
+
+    # Get user info for display
+    user_name = _get_user_name(user_id)
+    logger.info(f"Resolved '{person}' to '{user_name}' ({user_id})")
+
+    response = {
+        "person": user_name,
+        "user_id": user_id,
+        "query": person,
+        "resolved_via": "context" if user_id_result != _get_user_id(person) else "direct",
+    }
+
+    # Get presence status (always useful)
+    try:
+        presence_result = slack_client.users_getPresence(user=user_id)
+        response["status"] = {
+            "online": presence_result.get("presence") == "active",
+            "presence": presence_result.get("presence", "unknown"),
+        }
+    except SlackApiError:
+        response["status"] = {"online": None, "presence": "unknown"}
+
+    # Based on question_type, gather the relevant information
+    if question_type in ("profile", "all"):
+        try:
+            result = slack_client.users_info(user=user_id)
+            u = result["user"]
+            profile = u.get("profile", {})
+            response["profile"] = {
+                "real_name": u.get("real_name", ""),
+                "email": profile.get("email", ""),
+                "title": profile.get("title", ""),
+                "status_text": profile.get("status_text", ""),
+                "timezone": u.get("tz", ""),
+            }
+        except SlackApiError as e:
+            response["profile"] = {"error": str(e)}
+
+    if question_type in ("activity", "all"):
+        # Search for their messages across all channels
+        client = _get_client_for_operation("search")
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        search_query = f"from:<@{user_id}> after:{cutoff_date}"
+
+        try:
+            logger.info(f"🔍 Searching for activity: query='{search_query}'")
+            result = client.search_messages(query=search_query, count=30, sort="timestamp", sort_dir="desc")
+            total_matches = result.get("messages", {}).get("total", 0)
+            matches = result.get("messages", {}).get("matches", [])
+            logger.info(f"🔍 Search results: total={total_matches}, returned={len(matches)}")
+
+            channels_active = set()
+            messages = []
+            for match in matches:
+                channel_name = match.get("channel", {}).get("name", "unknown")
+                if channel_name != "unknown":
+                    channels_active.add(channel_name)
+                messages.append({
+                    "channel": f"#{channel_name}" if channel_name != "unknown" else "DM",
+                    "text": match.get("text", "")[:300],
+                    "time": _format_timestamp(match["ts"]),
+                    "permalink": match.get("permalink", ""),
+                })
+
+            response["activity"] = {
+                "period": f"Last {days} days",
+                "total_messages": result.get("messages", {}).get("total", 0),
+                "active_in_channels": list(channels_active),
+                "recent_messages": messages[:10],
+            }
+        except SlackApiError as e:
+            response["activity"] = {"error": f"Could not search activity: {e.response.get('error', str(e))}"}
+
+    if question_type in ("dm_history", "last_message", "all"):
+        # Get DM conversation history with this person
+        client = _get_client_for_operation("dm")
+        dm_channel = _find_dm_channel_with_user(client, user_id)
+
+        if dm_channel:
+            try:
+                limit = 1 if question_type == "last_message" else 20
+                oldest = _parse_date_filter(days)
+                kwargs = {"channel": dm_channel, "limit": limit}
+                if oldest and question_type != "last_message":
+                    kwargs["oldest"] = oldest
+
+                result = client.conversations_history(**kwargs)
+                dm_messages = []
+                for msg in result.get("messages", []):
+                    sender_name = _get_user_name(msg.get("user", "unknown"))
+                    dm_messages.append({
+                        "from": sender_name,
+                        "text": msg.get("text", "")[:300],
+                        "time": _format_timestamp(msg["ts"]),
+                        "is_them": msg.get("user") == user_id,
+                    })
+
+                if question_type == "last_message":
+                    response["last_message"] = dm_messages[0] if dm_messages else None
+                else:
+                    response["dm_history"] = {
+                        "has_dm_conversation": True,
+                        "message_count": len(dm_messages),
+                        "messages": dm_messages,
+                    }
+            except SlackApiError as e:
+                if question_type == "last_message":
+                    response["last_message"] = {"error": str(e)}
+                else:
+                    response["dm_history"] = {"error": f"Could not read DMs: {e.response.get('error', str(e))}"}
+        else:
+            if question_type == "last_message":
+                response["last_message"] = None
+            else:
+                response["dm_history"] = {
+                    "has_dm_conversation": False,
+                    "note": f"No DM conversation found with {user_name}",
+                }
+
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+
+async def handle_get_user_activity(arguments: dict) -> list[TextContent]:
+    """Get a specific user's recent activity across all channels."""
+    user_query = arguments["user"]
+    days_ago = arguments.get("days_ago", 7)
+    limit = arguments.get("limit", 30)
+
+    # Use context-aware resolution (prioritizes users from recent DMs)
+    user_id_result = _resolve_user_with_context(user_query)
+    is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user_query)
+
+    if error_msg:
+        return [TextContent(type="text", text=json.dumps({
+            "error": error_msg,
+            "query": user_query,
+            "suggestion": "Try using the person's full name or email address."
+        }, indent=2))]
+
+    # Get user info
+    user_name = _get_user_name(user_id)
+
+    # Use Slack search API to find all messages from this user
+    client = _get_client_for_operation("search")
+
+    # Build search query with date filter
+    cutoff_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+    search_query = f"from:<@{user_id}> after:{cutoff_date}"
+
+    logger.info(f"🔍 Searching for activity from '{user_name}' ({user_id}): {search_query}")
+
+    try:
+        result = client.search_messages(query=search_query, count=limit, sort="timestamp", sort_dir="desc")
+
+        messages = []
+        channels_active = set()
+
+        for match in result.get("messages", {}).get("matches", []):
+            channel_name = match.get("channel", {}).get("name", "unknown")
+            channels_active.add(channel_name)
+
+            messages.append({
+                "channel": f"#{channel_name}" if channel_name != "unknown" else "DM",
+                "text": match.get("text", "")[:500],
+                "time": _format_timestamp(match["ts"]),
+                "permalink": match.get("permalink", ""),
+            })
+
+        # Also get user presence
+        try:
+            presence_result = slack_client.users_getPresence(user=user_id)
+            presence = presence_result.get("presence", "unknown")
+            is_online = presence == "active"
+        except SlackApiError:
+            presence = "unknown"
+            is_online = None
+
+        response = {
+            "user": user_name,
+            "user_id": user_id,
+            "status": {
+                "online": is_online,
+                "presence": presence,
+            },
+            "activity_period": f"Last {days_ago} days",
+            "total_messages": result.get("messages", {}).get("total", 0),
+            "messages_returned": len(messages),
+            "active_in_channels": list(channels_active),
+            "recent_messages": messages,
+        }
+
+        return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+    except SlackApiError as e:
+        logger.error(f"Error searching for user activity: {e}")
+        return [TextContent(type="text", text=json.dumps({
+            "error": f"Failed to search for user activity: {e.response.get('error', str(e))}",
+            "user": user_name,
+            "user_id": user_id
+        }, indent=2))]
 
 
 async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:

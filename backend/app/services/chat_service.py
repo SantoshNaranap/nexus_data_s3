@@ -167,7 +167,7 @@ class ChatService:
             })
             messages.append({
                 "role": "user",
-                "content": "Based on the data above, please provide a clear, well-formatted response to my original question."
+                "content": "Based on the data above, please provide a clear, well-formatted response to my original question. IMPORTANT: If the data shows no results, empty data, or errors, tell the user exactly that - do NOT make up or invent data."
             })
 
             # Use Claude just for response generation (no tools needed)
@@ -330,11 +330,11 @@ class ChatService:
             # Add tool results to messages for context
             messages.append({
                 "role": "assistant",
-                "content": f"I retrieved the following data:\n{tool_context[:2000]}"
+                "content": f"I retrieved the following data:\n{tool_context[:8000]}"
             })
             messages.append({
                 "role": "user",
-                "content": "Based on the data above, please provide a clear, well-formatted response to my original question."
+                "content": "Based on the data above, please provide a clear, well-formatted response to my original question. IMPORTANT: If the data shows no results, empty data, or errors, tell the user exactly that - do NOT make up or invent data."
             })
 
             # Use Claude for response generation via claude_interaction_service
