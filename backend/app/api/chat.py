@@ -31,6 +31,13 @@ async def send_message(
 
     Supports both authenticated and anonymous users.
     """
+    # Validate message is not empty
+    if not request.message or not request.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty"
+        )
+
     try:
         # Generate session ID if not provided
         session_id = request.session_id or generate_session_id()
@@ -75,6 +82,13 @@ async def send_message_stream(
 
     Supports both authenticated and anonymous users.
     """
+    # Validate message is not empty
+    if not request.message or not request.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty"
+        )
+
     try:
         # Generate session ID if not provided
         session_id = request.session_id or generate_session_id()

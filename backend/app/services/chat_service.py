@@ -14,6 +14,7 @@ import logging
 import asyncio
 import time
 import re
+import json
 from typing import List, Dict, Any, AsyncGenerator, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,10 +156,26 @@ class ChatService:
             )
 
             # Build context from tool results for Claude to generate response
-            tool_context = "\n\n".join([
-                f"Tool: {r['tool']}\nResult: {r.get('result', r.get('error', 'No result'))}"
-                for r in tool_results
-            ])
+            # Check for error responses and format them clearly
+            tool_context_parts = []
+            for r in tool_results:
+                result_text = r.get('result', r.get('error', 'No result'))
+                logger.info(f"Tool result for {r.get('tool')}: {result_text[:200] if result_text else 'EMPTY'}")
+                # Detect JSON error responses and extract the error message
+                if result_text and '"error"' in result_text:
+                    try:
+                        result_json = json.loads(result_text)
+                        if 'error' in result_json:
+                            error_msg = result_json['error']
+                            suggestion = result_json.get('suggestion', '')
+                            result_text = f"ERROR: {error_msg}"
+                            if suggestion:
+                                result_text += f"\nSuggestion: {suggestion}"
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Keep original text if not valid JSON
+                tool_context_parts.append(f"Tool: {r['tool']}\nResult: {result_text}")
+            tool_context = "\n\n".join(tool_context_parts)
+            logger.info(f"Final tool_context: {tool_context[:500]}")
 
             # Add tool results to messages for context
             messages.append({
@@ -170,6 +187,8 @@ class ChatService:
                 "content": "Based on the data above, please provide a clear, well-formatted response to my original question. IMPORTANT: If the data shows no results, empty data, or errors, tell the user exactly that - do NOT make up or invent data."
             })
 
+            logger.info(f"Sending to Claude with {len(messages)} messages")
+
             # Use Claude just for response generation (no tools needed)
             response_text, _ = await claude_interaction_service.call_claude(
                 messages=messages,
@@ -180,6 +199,8 @@ class ChatService:
                 user_id=user_id,
                 db=db,
             )
+            logger.info(f"Claude response_text length: {len(response_text) if response_text else 0}")
+            logger.info(f"Claude response_text: {response_text[:300] if response_text else 'EMPTY'}")
             tool_calls = [{"tool": t["tool"], "args": t["args"]} for t in fast_tools]
         else:
             # SLOW PATH: Process with Claude tool loop
@@ -322,10 +343,24 @@ class ChatService:
             )
 
             # Build context from tool results
-            tool_context = "\n\n".join([
-                f"Tool: {r['tool']}\nResult: {r.get('result', r.get('error', 'No result'))}"
-                for r in tool_results
-            ])
+            # Check for error responses and format them clearly
+            tool_context_parts = []
+            for r in tool_results:
+                result_text = r.get('result', r.get('error', 'No result'))
+                # Detect JSON error responses and extract the error message
+                if result_text and '"error"' in result_text:
+                    try:
+                        result_json = json.loads(result_text)
+                        if 'error' in result_json:
+                            error_msg = result_json['error']
+                            suggestion = result_json.get('suggestion', '')
+                            result_text = f"ERROR: {error_msg}"
+                            if suggestion:
+                                result_text += f"\nSuggestion: {suggestion}"
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Keep original text if not valid JSON
+                tool_context_parts.append(f"Tool: {r['tool']}\nResult: {result_text}")
+            tool_context = "\n\n".join(tool_context_parts)
 
             # Add tool results to messages for context
             messages.append({
