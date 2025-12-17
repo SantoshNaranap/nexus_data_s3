@@ -306,6 +306,7 @@ async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
             "summary": issue.fields.summary,
             "status": issue.fields.status.name,
             "project": issue.fields.project.key if hasattr(issue.fields, "project") and issue.fields.project else None,
+            "url": f"{jira_client.server_url}/browse/{issue.key}",
         }
         if hasattr(issue.fields, "assignee") and issue.fields.assignee:
             issue_data["assignee"] = issue.fields.assignee.displayName

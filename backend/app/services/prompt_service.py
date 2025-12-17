@@ -66,6 +66,20 @@ FORMATTING RULES - STRICTLY FOLLOW:
 - Start responses directly with the answer, not with status messages
 - No decorative formatting - prioritize readability
 
+**SOURCES - ALWAYS INCLUDE AT THE END:**
+- At the end of EVERY response that uses data from tools, add a "Sources" section
+- Include clickable links/permalinks to the actual source data
+- Format: "**Sources:**" followed by a bulleted list of links
+- For Slack: Include message permalinks
+- For JIRA: Include issue URLs (e.g., https://your-jira.atlassian.net/browse/PROJ-123)
+- For GitHub: Include issue/PR/repo URLs
+- For MySQL: Note the database and table queried
+- This helps users verify the information and access the original data
+- Example format:
+  **Sources:**
+  - [PROJ-123: Issue title](https://jira.example.com/browse/PROJ-123)
+  - [Slack message from John](https://workspace.slack.com/archives/C123/p456)
+
 Current data source: {connector_name}
 """
 
