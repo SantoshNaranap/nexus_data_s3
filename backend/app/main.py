@@ -53,35 +53,8 @@ async def lifespan(app: FastAPI):
                 "Database init failed but continuing in development mode. "
                 "Some features requiring database will not work."
             )
-            
-            if jira_configured:
-                try:
-                    import jira
-                    connectors_to_prewarm.append("jira")
-                    logger.info("JIRA credentials configured, will pre-warm JIRA connector")
-                except ImportError:
-                    logger.warning("⚠️ JIRA connector dependencies not installed, skipping jira pre-warming")
-            else:
-                logger.info("⚠️ JIRA credentials not configured, skipping jira pre-warming")
-            
-            if connectors_to_prewarm:
-                logger.info(f"🔥 Pre-warming MCP connections for: {connectors_to_prewarm}")
-                await mcp_service.prewarm_connections(connectors_to_prewarm)
-        except Exception as e:
-            logger.warning(f"Pre-warming failed (non-fatal): {e}")
-    
-    # Start pre-warming in background (don't await - let it run in background)
-    # This allows the app to start serving requests immediately
-    asyncio.create_task(prewarm_background())
 
-    # Pre-warm MCP connections for faster first requests
-    # Disabled during startup - will connect on first use
-    # try:
-    #     connectors_to_prewarm = ["s3", "jira"]
-    #     logger.info(f"Pre-warming MCP connections for: {connectors_to_prewarm}")
-    #     await mcp_service.prewarm_connections(connectors_to_prewarm)
-    # except Exception as e:
-    #     logger.warning(f"Pre-warming failed (non-fatal): {e}")
+    # MCP connections will be established on first use
     logger.info("MCP connections will be established on first use")
 
     yield
@@ -147,10 +120,11 @@ app.add_middleware(
     secret_key=settings.jwt_secret_key,
 )
 
-# Add CORS middleware
+# Add CORS middleware - allow render.com and trycloudflare.com for demos
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=r"https://.*\.(onrender\.com|trycloudflare\.com)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

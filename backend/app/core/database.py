@@ -19,13 +19,17 @@ DATABASE_URL = (
     f"@{settings.local_mysql_host}:{settings.local_mysql_port}/{settings.local_mysql_database}"
 )
 
-# Create async engine
+# Create async engine with connection timeout
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,  # Enable connection health checks
-    pool_size=10,
-    max_overflow=20,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=10,  # Wait max 10 seconds for connection
+    connect_args={
+        "connect_timeout": 10,  # MySQL connection timeout
+    },
 )
 
 # Create async session factory

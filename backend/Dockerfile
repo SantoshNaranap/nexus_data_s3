@@ -5,31 +5,26 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
-COPY backend/requirements.txt .
-
-# Install Python dependencies for backend
+# Copy requirements and install
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy connectors source code
-COPY connectors /connectors
-
-# Install dependencies for each connector
-# Note: Google Workspace connector has many dependencies, better to install them
-RUN pip install -e /connectors/jira \
-    && pip install -e /connectors/s3 \
-    && pip install -e /connectors/mysql \
-    && pip install -e /connectors/shopify \
-    && pip install -e /connectors/google_workspace
+# Install connectors directly from GitHub (since they're in the same repo)
+RUN pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/jira \
+    && pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/s3 \
+    && pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/mysql \
+    && pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/shopify \
+    && pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/slack \
+    && pip install git+https://github.com/kaaylabs-v2/Mosaic.git#subdirectory=connectors/github_connector
 
 # Copy application code
-COPY backend/ .
+COPY . .
 
-# Copy connectors directory (needed for MCP connectors)
-# Connectors are expected at /connectors in the container
-COPY connectors /connectors
+# Create connectors directory structure for MCP server paths
+RUN mkdir -p /connectors
 
 # Expose port
 EXPOSE 8000
