@@ -18,10 +18,29 @@ from typing import List, Dict, Any, Optional
 from anthropic import APIError, APIConnectionError, RateLimitError
 
 from app.services.claude_client import claude_client
+from app.core.config import settings
+from app.core.security import sanitize_for_llm
 from app.models.agent import DataSourceRelevance
 
 # Configure logging for the source detector
 logger = logging.getLogger(__name__)
+
+# Confidence score constants for source detection
+CONFIDENCE_MIN_THRESHOLD = 0.3      # Minimum confidence to include a source
+CONFIDENCE_HIGH_THRESHOLD = 0.6     # High confidence - skip LLM analysis
+CONFIDENCE_LLM_MIN = 0.4            # Minimum confidence for LLM-detected sources
+CONFIDENCE_DEFAULT = 0.5            # Default confidence when not specified
+CONFIDENCE_MAX = 1.0                # Maximum confidence score
+CONFIDENCE_MIN = 0.0                # Minimum confidence score
+
+# Keyword matching weights
+KEYWORD_MATCH_WEIGHT = 0.2          # Confidence boost per keyword match
+KEYWORD_MATCH_CAP = 0.6             # Maximum confidence from keyword matches alone
+NEGATIVE_KEYWORD_PENALTY = 0.15     # Confidence reduction per negative keyword
+
+# Source pattern weights
+SOURCE_WEIGHT_HIGH = 0.85           # High relevance sources (jira, mysql)
+SOURCE_WEIGHT_STANDARD = 0.8        # Standard relevance sources (slack, s3, google)
 
 
 class SourceDetector:
@@ -70,7 +89,7 @@ class SourceDetector:
                 # Keywords that suggest NOT S3
                 "negative_keywords": ["email", "calendar", "issue", "ticket", "order", "product"],
                 # Base confidence weight for keyword matches
-                "weight": 0.8,
+                "weight": SOURCE_WEIGHT_STANDARD,
             },
             "mysql": {
                 # Keywords that indicate database queries
@@ -82,7 +101,7 @@ class SourceDetector:
                 ],
                 # Keywords that suggest NOT MySQL
                 "negative_keywords": ["s3", "bucket", "jira", "issue", "email"],
-                "weight": 0.8,
+                "weight": SOURCE_WEIGHT_STANDARD,
             },
             "jira": {
                 # Keywords that indicate JIRA/project management queries
@@ -94,7 +113,7 @@ class SourceDetector:
                     "developer", "qa", "testing", "release", "version"
                 ],
                 "negative_keywords": ["s3", "bucket", "order", "product", "email"],
-                "weight": 0.85,
+                "weight": SOURCE_WEIGHT_HIGH,
             },
             "shopify": {
                 # Keywords that indicate e-commerce/Shopify queries
@@ -105,7 +124,7 @@ class SourceDetector:
                     "sku", "variant", "collection", "discount", "coupon", "refund"
                 ],
                 "negative_keywords": ["jira", "issue", "bug", "s3", "email"],
-                "weight": 0.85,
+                "weight": SOURCE_WEIGHT_HIGH,
             },
             "google_workspace": {
                 # Keywords that indicate Google Workspace queries
@@ -116,7 +135,18 @@ class SourceDetector:
                     "document", "folder", "share", "collaborate", "workspace"
                 ],
                 "negative_keywords": ["s3", "bucket", "jira", "shopify", "order"],
-                "weight": 0.8,
+                "weight": SOURCE_WEIGHT_STANDARD,
+            },
+            "slack": {
+                # Keywords that indicate Slack/messaging queries
+                "keywords": [
+                    "slack", "channel", "channels", "message", "messages", "dm",
+                    "direct message", "thread", "threads", "conversation", "chat",
+                    "workspace", "mention", "mentions", "reaction", "emoji",
+                    "user", "users", "team", "members", "post", "notification"
+                ],
+                "negative_keywords": ["s3", "bucket", "jira", "issue", "order", "product"],
+                "weight": SOURCE_WEIGHT_STANDARD,
             },
         }
 
@@ -157,6 +187,12 @@ class SourceDetector:
                 "best_for": "Emails, documents, calendar events, collaboration",
                 "data_types": "Emails, documents, spreadsheets, calendar events",
             },
+            "slack": {
+                "name": "Slack",
+                "description": "Team messaging and collaboration platform",
+                "best_for": "Messages, channels, conversations, team communication",
+                "data_types": "Messages, channels, threads, DMs, reactions",
+            },
         }
 
     def _rule_based_detection(self, query: str) -> List[DataSourceRelevance]:
@@ -164,7 +200,7 @@ class SourceDetector:
         Perform fast rule-based source detection using keyword matching.
         
         This is the first tier of detection - fast but less nuanced.
-        Returns sources with confidence > 0.3 based on keyword matches.
+        Returns sources with confidence > CONFIDENCE_MIN_THRESHOLD based on keyword matches.
         
         Args:
             query: The natural language query to analyze
@@ -192,18 +228,18 @@ class SourceDetector:
             # Calculate confidence score
             if keyword_matches > 0:
                 # Base confidence from keyword matches
-                base_confidence = min(keyword_matches * 0.2, 0.6)
+                base_confidence = min(keyword_matches * KEYWORD_MATCH_WEIGHT, KEYWORD_MATCH_CAP)
                 
                 # Apply source weight
                 confidence = base_confidence * patterns["weight"]
                 
                 # Reduce confidence for negative matches
-                confidence -= negative_matches * 0.15
+                confidence -= negative_matches * NEGATIVE_KEYWORD_PENALTY
                 
                 # Ensure confidence is in valid range
-                confidence = max(0.0, min(1.0, confidence))
+                confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
                 
-                if confidence > 0.3:
+                if confidence > CONFIDENCE_MIN_THRESHOLD:
                     # Generate reasoning based on matches
                     matched_keywords = [
                         kw for kw in patterns["keywords"]
@@ -255,38 +291,50 @@ class SourceDetector:
             elif "calendar" in query_lower or "meeting" in query_lower:
                 return "Use get_events to check calendar"
             return "Use search_drive_files to find documents"
-            
+
+        elif datasource == "slack":
+            if "channel" in query_lower:
+                return "Use list_channels to see available channels"
+            elif "dm" in query_lower or "direct message" in query_lower:
+                return "Use list_dms to see direct message conversations"
+            elif "search" in query_lower:
+                return "Use search_messages to find specific content"
+            return "Use read_channel or search_messages to retrieve messages"
+
         return "Query this source for relevant information"
 
     async def detect_sources_llm(
-        self, 
+        self,
         query: str,
         available_sources: List[str]
     ) -> List[DataSourceRelevance]:
         """
         Use LLM to analyze query and detect relevant sources.
-        
+
         This is the second tier of detection - slower but more accurate.
         Used for complex or ambiguous queries where rule-based fails.
-        
+
         Args:
             query: The natural language query to analyze
             available_sources: List of available datasource IDs
-            
+
         Returns:
             List of DataSourceRelevance objects from LLM analysis
         """
+        # Sanitize user query to prevent prompt injection
+        sanitized_query = sanitize_for_llm(query, max_length=5000)
+
         # Build context about available sources
         sources_context = "\n".join([
             f"- {src}: {self._source_metadata.get(src, {}).get('description', 'Unknown source')}"
             f" (best for: {self._source_metadata.get(src, {}).get('best_for', 'general queries')})"
             for src in available_sources
         ])
-        
-        # Create prompt for source detection
+
+        # Create prompt for source detection with sanitized query
         prompt = f"""Analyze this user query and determine which data sources are relevant.
 
-USER QUERY: "{query}"
+USER QUERY: "{sanitized_query}"
 
 AVAILABLE DATA SOURCES:
 {sources_context}
@@ -297,7 +345,7 @@ For each relevant source, provide:
 3. reasoning: Why this source is relevant
 4. suggested_approach: How to query this source
 
-Respond with a JSON array of relevant sources. Only include sources with confidence >= 0.4.
+Respond with a JSON array of relevant sources. Only include sources with confidence >= {CONFIDENCE_LLM_MIN}.
 If no sources are clearly relevant, return an empty array.
 
 Example response:
@@ -309,10 +357,10 @@ Example response:
 JSON Response:"""
 
         try:
-            # Use Haiku for fast, cost-effective source detection
+            # Use configured model for fast, cost-effective source detection
             response = self.client.messages.create(
-                model="claude-3-5-haiku-20241022",
-                max_tokens=1000,
+                model=settings.llm_model_routing,
+                max_tokens=settings.llm_max_tokens_routing,
                 messages=[{"role": "user", "content": prompt}],
             )
             
@@ -329,7 +377,7 @@ JSON Response:"""
                     if src.get("datasource") in available_sources:
                         results.append(DataSourceRelevance(
                             datasource=src["datasource"],
-                            confidence=min(1.0, max(0.0, src.get("confidence", 0.5))),
+                            confidence=min(CONFIDENCE_MAX, max(CONFIDENCE_MIN, src.get("confidence", CONFIDENCE_DEFAULT))),
                             reasoning=src.get("reasoning", "LLM determined relevance"),
                             suggested_approach=src.get("suggested_approach", None)
                         ))
@@ -381,7 +429,7 @@ JSON Response:"""
                    f"{[r.datasource for r in rule_results]}")
         
         # If rule-based found high-confidence results, use them
-        if rule_results and rule_results[0].confidence >= 0.6:
+        if rule_results and rule_results[0].confidence >= CONFIDENCE_HIGH_THRESHOLD:
             logger.info("Using rule-based results (high confidence)")
             return rule_results
         
@@ -481,6 +529,8 @@ JSON Response:"""
 
 # Create global instance for import
 source_detector = SourceDetector()
+
+
 
 
 

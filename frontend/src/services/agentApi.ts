@@ -7,6 +7,38 @@
 
 import { API_BASE_URL } from './api';
 
+// Default timeout for API requests (2 minutes)
+const DEFAULT_TIMEOUT_MS = 120000;
+// Longer timeout for streaming requests (5 minutes)
+const STREAM_TIMEOUT_MS = 300000;
+
+/**
+ * Create a fetch request with timeout support
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${timeoutMs / 1000} seconds`);
+    }
+    throw error;
+  }
+}
+
 /**
  * Data source relevance information from the source detector
  */
@@ -99,10 +131,10 @@ export interface MultiSourceDetection {
 export const agentApi = {
   /**
    * Execute a multi-source query
-   * 
+   *
    * @param request - The multi-source query request
    * @returns MultiSourceResponse with synthesized results
-   * 
+   *
    * @example
    * const response = await agentApi.query({
    *   query: "What are my latest JIRA tasks and recent emails?",
@@ -111,14 +143,18 @@ export const agentApi = {
    * });
    */
   query: async (request: MultiSourceRequest): Promise<MultiSourceResponse> => {
-    const response = await fetch(`${API_BASE_URL}/api/agent/query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/api/agent/query`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include', // Include cookies for auth
+        body: JSON.stringify(request),
       },
-      credentials: 'include', // Include cookies for auth
-      body: JSON.stringify(request),
-    });
+      DEFAULT_TIMEOUT_MS
+    );
 
     if (!response.ok) {
       throw new Error(`Agent query failed: ${response.statusText}`);
@@ -160,14 +196,18 @@ export const agentApi = {
       onEvent?: (event: AgentStreamEvent) => void; // Raw event handler
     }
   ): Promise<void> => {
-    const response = await fetch(`${API_BASE_URL}/api/agent/query/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/api/agent/query/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify(request),
       },
-      credentials: 'include',
-      body: JSON.stringify(request),
-    });
+      STREAM_TIMEOUT_MS  // Longer timeout for streaming
+    );
 
     if (!response.ok) {
       throw new Error(`Agent stream failed: ${response.statusText}`);
@@ -244,11 +284,11 @@ export const agentApi = {
 
   /**
    * Get source suggestions for a query without executing it
-   * 
+   *
    * @param query - The natural language query
    * @param maxSuggestions - Maximum number of suggestions (default 5)
    * @returns List of relevant sources with confidence scores
-   * 
+   *
    * @example
    * const suggestions = await agentApi.suggest("Show me open bugs", 3);
    * // Returns: [{ datasource: "jira", confidence: 0.95, reasoning: "..." }]
@@ -257,14 +297,18 @@ export const agentApi = {
     query: string,
     maxSuggestions: number = 5
   ): Promise<DataSourceRelevance[]> => {
-    const response = await fetch(`${API_BASE_URL}/api/agent/suggest`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/api/agent/suggest`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ query, max_suggestions: maxSuggestions }),
       },
-      credentials: 'include',
-      body: JSON.stringify({ query, max_suggestions: maxSuggestions }),
-    });
+      DEFAULT_TIMEOUT_MS
+    );
 
     if (!response.ok) {
       throw new Error(`Suggest failed: ${response.statusText}`);
@@ -275,10 +319,10 @@ export const agentApi = {
 
   /**
    * Detect if a query should use multi-source processing
-   * 
+   *
    * @param query - The natural language query
    * @returns Detection result with recommendation
-   * 
+   *
    * @example
    * const detection = await agentApi.detect("Compare JIRA with emails");
    * if (detection.is_multi_source) {
@@ -288,14 +332,18 @@ export const agentApi = {
    * }
    */
   detect: async (query: string): Promise<MultiSourceDetection> => {
-    const response = await fetch(`${API_BASE_URL}/api/agent/detect`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/api/agent/detect`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ query }),
       },
-      credentials: 'include',
-      body: JSON.stringify({ query }),
-    });
+      DEFAULT_TIMEOUT_MS
+    );
 
     if (!response.ok) {
       throw new Error(`Detection failed: ${response.statusText}`);
@@ -306,7 +354,7 @@ export const agentApi = {
 
   /**
    * Get list of available data sources
-   * 
+   *
    * @returns List of available sources with metadata
    */
   getSources: async (): Promise<Array<{
@@ -315,10 +363,14 @@ export const agentApi = {
     description: string;
     enabled: boolean;
   }>> => {
-    const response = await fetch(`${API_BASE_URL}/api/agent/sources`, {
-      method: 'GET',
-      credentials: 'include',
-    });
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/api/agent/sources`,
+      {
+        method: 'GET',
+        credentials: 'include',
+      },
+      DEFAULT_TIMEOUT_MS
+    );
 
     if (!response.ok) {
       throw new Error(`Get sources failed: ${response.statusText}`);
@@ -329,6 +381,8 @@ export const agentApi = {
 };
 
 export default agentApi;
+
+
 
 
 

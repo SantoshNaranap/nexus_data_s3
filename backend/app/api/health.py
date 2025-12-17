@@ -6,7 +6,7 @@ orchestration, plus detailed system status for monitoring.
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -50,7 +50,7 @@ async def health_check():
     """
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -148,7 +148,7 @@ async def detailed_health_check(db: AsyncSession = Depends(get_db)):
 
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "version": getattr(settings, "version", "1.0.0"),
         "environment": settings.environment,
         "uptime": {

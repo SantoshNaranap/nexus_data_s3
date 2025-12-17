@@ -111,10 +111,39 @@ S3 TOOLS - COMPREHENSIVE GUIDE:
 
     def get_direct_routing(self, message: str) -> Optional[List[Dict[str, Any]]]:
         """Direct routing for common S3 queries."""
+        import re
         message_lower = message.lower().strip()
 
-        # List buckets
-        if any(kw in message_lower for kw in ["bucket", "buckets", "what bucket", "list bucket", "show bucket"]):
+        # Check if asking about contents of a SPECIFIC bucket
+        # Patterns like "what is in [bucket]", "contents of [bucket]", "files in [bucket]"
+        content_patterns = [
+            r"what(?:'s| is) in (?:the )?(\S+)(?: bucket)?",
+            r"(?:show|list|get) (?:me )?(?:the )?(?:contents?|files?|objects?) (?:of |in |from )?(?:the )?(\S+)(?: bucket)?",
+            r"contents? of (?:the )?(\S+)(?: bucket)?",
+            r"files? in (?:the )?(\S+)(?: bucket)?",
+            r"(\S+) bucket(?:'s)? (?:contents?|files?|objects?)",
+        ]
+
+        for pattern in content_patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                bucket_name = match.group(1).strip("'\"")
+                # Skip if the matched word is a generic term, not a bucket name
+                if bucket_name not in ["my", "the", "a", "all", "s3", "bucket", "buckets"]:
+                    return [{"tool": "list_objects", "args": {"bucket": bucket_name}}]
+
+        # List all buckets - only when asking generically
+        list_bucket_patterns = [
+            "list buckets",
+            "list my buckets",
+            "show buckets",
+            "show my buckets",
+            "what buckets",
+            "which buckets",
+            "my s3 buckets",
+            "all buckets",
+        ]
+        if any(pattern in message_lower for pattern in list_bucket_patterns):
             return [{"tool": "list_buckets", "args": {}}]
 
         return None

@@ -162,45 +162,23 @@ class MCPService:
         db: Optional[any] = None,
     ) -> dict:
         """
-        Get environment variables for a connector, merging user credentials
-        with defaults from settings.
+        Get environment variables for a connector.
 
-        Uses the connector registry to map credential fields to env vars.
-        Prioritizes user_id credentials over session_id credentials.
+        AUTH DISABLED (krishnan-test branch):
+        Only uses credentials from .env/settings - no user credential lookups.
         """
         # Get connector from registry
         connector = get_connector(datasource)
         if not connector:
             raise ValueError(f"Unknown data source: {datasource}")
 
-        # Start with defaults from settings
+        # Use defaults from settings (.env file)
         env = connector.get_default_env_from_settings(settings)
 
         # Add additional env from connector
         env.update(connector.additional_env)
 
-        # Prioritize user_id over session_id
-        if user_id:
-            user_credentials = await credential_service.get_credentials(
-                datasource=datasource,
-                db=db,
-                user_id=user_id,
-            )
-        elif session_id:
-            user_credentials = await credential_service.get_credentials(
-                datasource=datasource,
-                session_id=session_id,
-            )
-        else:
-            user_credentials = None
-
-        if user_credentials:
-            # Use connector's method to convert credentials to env vars
-            user_env = connector.get_env_from_credentials(user_credentials)
-            env.update(user_env)
-
-            credential_type = "user" if user_id else "session"
-            logger.info(f"Using {credential_type} credentials for {datasource}")
+        logger.info(f"Using .env credentials for {datasource} (auth disabled)")
 
         return env
 

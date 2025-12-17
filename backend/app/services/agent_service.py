@@ -17,7 +17,8 @@ The agent uses an intelligent planning approach with:
 import logging
 import asyncio
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -84,13 +85,75 @@ class AgentOrchestrator:
 
     def __init__(self):
         """Initialize the agent orchestrator."""
-        # Session storage for multi-turn conversations
-        self.sessions: Dict[str, List[dict]] = {}
-        
-        # Default configuration
+        # Session storage for multi-turn conversations with timestamps
+        # Format: {session_id: {"data": [...], "created_at": datetime, "last_accessed": datetime}}
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._sessions_lock = asyncio.Lock()
+        self._cleanup_task: Optional[asyncio.Task] = None
+
+        # Default configuration from settings
         self.default_confidence_threshold = 0.5
-        self.default_max_sources = 3
-        self.query_timeout_seconds = 60
+        self.default_max_sources = min(3, settings.agent_max_sources)
+        self.query_timeout_seconds = settings.agent_query_timeout_seconds
+        self.session_ttl_minutes = settings.agent_session_ttl_minutes
+
+    async def _cleanup_expired_sessions(self) -> None:
+        """Background task to clean up expired sessions."""
+        while True:
+            try:
+                await asyncio.sleep(300)  # Run every 5 minutes
+
+                async with self._sessions_lock:
+                    now = datetime.now(timezone.utc)
+                    ttl = timedelta(minutes=self.session_ttl_minutes)
+                    expired_sessions = [
+                        sid for sid, session in self._sessions.items()
+                        if now - session.get("last_accessed", session.get("created_at", now)) > ttl
+                    ]
+
+                    for sid in expired_sessions:
+                        del self._sessions[sid]
+
+                    if expired_sessions:
+                        logger.info(f"Cleaned up {len(expired_sessions)} expired sessions. Active: {len(self._sessions)}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Session cleanup error: {e}")
+
+    def start_cleanup_task(self) -> None:
+        """Start the background cleanup task."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_expired_sessions())
+            logger.info("Started session cleanup background task")
+
+    async def get_session(self, session_id: str) -> List[dict]:
+        """Get session data, updating last accessed time."""
+        async with self._sessions_lock:
+            if session_id in self._sessions:
+                self._sessions[session_id]["last_accessed"] = datetime.now(timezone.utc)
+                return self._sessions[session_id]["data"]
+            return []
+
+    async def set_session(self, session_id: str, data: List[dict]) -> None:
+        """Set session data with timestamp tracking."""
+        async with self._sessions_lock:
+            now = datetime.now(timezone.utc)
+            if session_id in self._sessions:
+                self._sessions[session_id]["data"] = data
+                self._sessions[session_id]["last_accessed"] = now
+            else:
+                self._sessions[session_id] = {
+                    "data": data,
+                    "created_at": now,
+                    "last_accessed": now,
+                }
+
+    @property
+    def sessions(self) -> Dict[str, List[dict]]:
+        """Legacy property for backward compatibility. Returns session data only."""
+        return {sid: s["data"] for sid, s in self._sessions.items()}
 
     async def process_multi_source_query(
         self,
@@ -116,7 +179,7 @@ class AgentOrchestrator:
         start_time = time.time()
         session_id = request.session_id or generate_session_id()
         
-        logger.info(f"🤖 Processing multi-source query: {request.query[:100]}...")
+        logger.info(f"Processing multi-source query: {request.query[:100]}...")
         
         try:
             # PHASE 1: PLANNING
@@ -134,7 +197,7 @@ class AgentOrchestrator:
                     total_execution_time_ms=(time.time() - start_time) * 1000,
                 )
             
-            logger.info(f"📋 Execution plan: {plan.sources_to_query}")
+            logger.info(f"Execution plan: {plan.sources_to_query}")
             
             # PHASE 2: EXECUTION
             # Query all sources in parallel
@@ -168,7 +231,7 @@ class AgentOrchestrator:
             )
             
             total_time = (time.time() - start_time) * 1000
-            logger.info(f"✅ Multi-source query completed in {total_time:.0f}ms "
+            logger.info(f"Multi-source query completed in {total_time:.0f}ms "
                        f"({len(successful_sources)} succeeded, {len(failed_sources)} failed)")
             
             return MultiSourceResponse(
@@ -232,7 +295,7 @@ class AgentOrchestrator:
         start_time = time.time()
         session_id = request.session_id or generate_session_id()
         
-        logger.info(f"🤖 Streaming multi-source query: {request.query[:100]}...")
+        logger.info(f"Streaming multi-source query: {request.query[:100]}...")
         
         # Emit: Query started
         yield AgentStreamEvent(
@@ -274,12 +337,12 @@ class AgentOrchestrator:
                 data={"sources": plan.sources_to_query},
                 message="⚡ Querying data sources...",
             )
-            
+
             # Execute queries and emit progress for each
             source_results = []
-            
-            # Create tasks for parallel execution
-            tasks = []
+
+            # Create tasks for parallel execution with source tracking
+            task_to_source: Dict[asyncio.Task, Tuple[str, Optional[str]]] = {}
             for source in plan.sources_to_query:
                 # Get suggested approach from plan
                 suggested = None
@@ -287,7 +350,7 @@ class AgentOrchestrator:
                     if rel.datasource == source:
                         suggested = rel.suggested_approach
                         break
-                
+
                 task = asyncio.create_task(
                     self._execute_single_query(
                         query=request.query,
@@ -298,23 +361,26 @@ class AgentOrchestrator:
                         db=db,
                     )
                 )
-                tasks.append((source, task))
-            
-            # Wait for all tasks and emit events as they complete
-            for source, task in tasks:
+                task_to_source[task] = (source, suggested)
+
+            # Emit source_start events for ALL sources immediately (they're running in parallel)
+            for source in plan.sources_to_query:
                 yield AgentStreamEvent(
                     event_type="source_start",
                     data={"datasource": source},
                     message=f"🔄 Querying {source.upper()}...",
                 )
-                
+
+            # Use as_completed to emit events as each task finishes (in completion order)
+            for completed_task in asyncio.as_completed(
+                list(task_to_source.keys()),
+                timeout=self.query_timeout_seconds
+            ):
                 try:
-                    result = await asyncio.wait_for(
-                        task,
-                        timeout=self.query_timeout_seconds
-                    )
+                    result = await completed_task
+                    source = result.datasource
                     source_results.append(result)
-                    
+
                     if result.success:
                         yield AgentStreamEvent(
                             event_type="source_complete",
@@ -335,18 +401,23 @@ class AgentOrchestrator:
                             },
                             message=f"⚠️ {source.upper()} query failed",
                         )
-                        
+
                 except asyncio.TimeoutError:
-                    source_results.append(SourceQueryResult(
-                        datasource=source,
-                        success=False,
-                        error="Query timed out",
-                    ))
-                    yield AgentStreamEvent(
-                        event_type="source_complete",
-                        data={"datasource": source, "success": False, "error": "Timeout"},
-                        message=f"⏱️ {source.upper()} query timed out",
-                    )
+                    # Find which tasks timed out
+                    for task, (source, _) in task_to_source.items():
+                        if not task.done():
+                            task.cancel()
+                            source_results.append(SourceQueryResult(
+                                datasource=source,
+                                success=False,
+                                error="Query timed out",
+                            ))
+                            yield AgentStreamEvent(
+                                event_type="source_complete",
+                                data={"datasource": source, "success": False, "error": "Timeout"},
+                                message=f"⏱️ {source.upper()} query timed out",
+                            )
+                    break  # Exit the as_completed loop after handling timeouts
             
             # PHASE 3: SYNTHESIS
             yield AgentStreamEvent(
@@ -356,13 +427,11 @@ class AgentOrchestrator:
             )
             
             # Stream the synthesis
-            synthesis_chunks = []
             async for chunk in result_synthesizer.synthesize_stream(
                 query=request.query,
                 results=source_results,
                 plan=plan,
             ):
-                synthesis_chunks.append(chunk)
                 yield AgentStreamEvent(
                     event_type="synthesis_chunk",
                     data={"content": chunk},
@@ -725,6 +794,8 @@ class AgentOrchestrator:
 
 # Create global instance for import
 agent_orchestrator = AgentOrchestrator()
+
+
 
 
 

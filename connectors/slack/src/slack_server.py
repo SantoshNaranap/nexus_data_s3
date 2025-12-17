@@ -21,7 +21,49 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 # Thread pool for parallel Slack API calls (Slack SDK is synchronous)
-_executor = ThreadPoolExecutor(max_workers=20)
+_executor = ThreadPoolExecutor(max_workers=10)  # Reduced from 20 to be more conservative
+_executor_shutdown = False
+
+
+def shutdown_executor() -> None:
+    """Shutdown the thread pool executor gracefully."""
+    global _executor_shutdown
+    if not _executor_shutdown:
+        _executor_shutdown = True
+        _executor.shutdown(wait=True, cancel_futures=False)
+        logger.info("Thread pool executor shut down gracefully")
+
+
+async def _async_sleep(seconds: float) -> None:
+    """Async-compatible sleep for use in async handlers."""
+    await asyncio.sleep(seconds)
+
+
+def _sync_sleep(seconds: float) -> None:
+    """Synchronous sleep for use in thread pool executors."""
+    import time as time_module
+    time_module.sleep(seconds)
+
+
+def _error_response(error: str, error_type: str = "error", details: Optional[Dict] = None) -> list[TextContent]:
+    """Create a standardized JSON error response.
+
+    Args:
+        error: The error message
+        error_type: Type of error (e.g., "not_found", "ambiguous", "api_error")
+        details: Optional additional details
+
+    Returns:
+        List containing a TextContent with JSON error
+    """
+    response = {
+        "error": error,
+        "type": error_type,
+        "success": False,
+    }
+    if details:
+        response.update(details)
+    return [TextContent(type="text", text=json.dumps(response, indent=2))]
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -68,22 +110,101 @@ def _get_client_for_operation(operation_type: str = "default") -> WebClient:
 # Create MCP server
 app = Server("slack-connector")
 
-# Cache for channel/user lookups
-_channel_cache: dict = {}
-_user_cache: dict = {}
-_user_info_cache: dict = {}  # user_id -> {name, real_name} for fast lookups
+# Cache configuration
+CACHE_MAX_SIZE = 1000  # Maximum entries per cache
+CACHE_TTL_SECONDS = 3600  # 1 hour TTL for cache entries
+
+
+class LRUCache:
+    """Simple LRU cache with TTL support and size limits."""
+
+    def __init__(self, max_size: int = CACHE_MAX_SIZE, ttl_seconds: int = CACHE_TTL_SECONDS):
+        self._cache: Dict[str, Any] = {}
+        self._timestamps: Dict[str, float] = {}
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._access_order: List[str] = []
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache, respecting TTL."""
+        if key not in self._cache:
+            return None
+
+        # Check TTL
+        timestamp = self._timestamps.get(key, 0)
+        if datetime.now().timestamp() - timestamp > self._ttl:
+            self._remove(key)
+            return None
+
+        # Update access order for LRU
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+
+        return self._cache[key]
+
+    def set(self, key: str, value: Any) -> None:
+        """Set value in cache with current timestamp."""
+        # Evict oldest if at capacity
+        while len(self._cache) >= self._max_size and self._access_order:
+            oldest_key = self._access_order.pop(0)
+            self._remove(oldest_key)
+
+        self._cache[key] = value
+        self._timestamps[key] = datetime.now().timestamp()
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+
+    def _remove(self, key: str) -> None:
+        """Remove a key from all internal structures."""
+        self._cache.pop(key, None)
+        self._timestamps.pop(key, None)
+        if key in self._access_order:
+            self._access_order.remove(key)
+
+    def __contains__(self, key: str) -> bool:
+        """Check if key exists and is not expired."""
+        return self.get(key) is not None
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.set(key, value)
+
+    def __getitem__(self, key: str) -> Any:
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        self._cache.clear()
+        self._timestamps.clear()
+        self._access_order.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+# Cache for channel/user lookups with size limits and TTL
+_channel_cache: LRUCache = LRUCache(max_size=500, ttl_seconds=CACHE_TTL_SECONDS)
+_user_cache: LRUCache = LRUCache(max_size=CACHE_MAX_SIZE, ttl_seconds=CACHE_TTL_SECONDS)
+_user_info_cache: LRUCache = LRUCache(max_size=CACHE_MAX_SIZE, ttl_seconds=CACHE_TTL_SECONDS)
 _users_loaded: bool = False
+_users_loaded_timestamp: float = 0
 
 
 def _preload_all_users() -> None:
     """Pre-load all users into cache for fast lookups. Call this once before bulk operations."""
-    global _users_loaded, _user_info_cache
+    global _users_loaded, _users_loaded_timestamp
 
-    if _users_loaded and _user_info_cache:
-        return  # Already loaded
+    # Check if cache is still valid (within TTL)
+    if _users_loaded and len(_user_info_cache) > 0:
+        if datetime.now().timestamp() - _users_loaded_timestamp < CACHE_TTL_SECONDS:
+            return  # Cache still valid
 
     try:
-        result = slack_client.users_list(limit=1000)
+        result = slack_client.users_list(limit=200)  # Reduced from 1000 to avoid IncompleteRead
         for user in result.get("members", []):
             if user.get("deleted") or user.get("is_bot"):
                 continue
@@ -122,6 +243,7 @@ def _preload_all_users() -> None:
                 _user_cache[display_name.lower()] = user_id
 
         _users_loaded = True
+        _users_loaded_timestamp = datetime.now().timestamp()
         logger.info(f"Pre-loaded {len(_user_info_cache)} users into cache")
     except SlackApiError as e:
         logger.warning(f"Failed to preload users: {e}")
@@ -249,12 +371,11 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
 
     try:
         # Retry with backoff for rate limiting and pagination
-        import time
         max_retries = 3
         all_members = []
         cursor = None
 
-        # Paginate through all users
+        # Paginate through all users (synchronous API, but we handle rate limits properly)
         while True:
             for attempt in range(max_retries):
                 try:
@@ -267,7 +388,10 @@ def _get_user_id(user_identifier: str) -> Optional[str]:
                     if 'ratelimited' in str(e) and attempt < max_retries - 1:
                         wait_time = int(e.response.headers.get('Retry-After', 2))
                         logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
-                        time.sleep(wait_time)
+                        # Use asyncio.sleep if in async context, otherwise use sync approach
+                        # Since this is called from sync code, we use a sync-compatible delay
+                        import time as time_module
+                        time_module.sleep(wait_time)
                     else:
                         raise
 
@@ -392,6 +516,15 @@ def _check_ambiguous_user(user_id_result: Optional[str], user_query: str) -> tup
         return True, None, f"Multiple users match '{user_query}'. Did you mean: {candidates}? Please be more specific (use full name or email)."
 
     return False, user_id_result, None
+
+
+async def _get_user_id_async(user_identifier: str) -> Optional[str]:
+    """Async version of _get_user_id that doesn't block the event loop.
+
+    Runs the synchronous user lookup in a thread pool executor to avoid blocking.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, _get_user_id, user_identifier)
 
 
 def _format_timestamp(ts: str) -> str:
@@ -852,8 +985,8 @@ Returns messages from all DMs and channels the user is part of, sorted by time."
                     },
                     "max_messages_per_conversation": {
                         "type": "integer",
-                        "description": "Max messages per DM/channel (default: 20)",
-                        "default": 20,
+                        "description": "Max messages per DM/channel (default: 10)",
+                        "default": 10,
                     },
                 },
                 "required": [],
@@ -904,13 +1037,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "get_all_recent_messages":
             return await handle_get_all_recent_messages(arguments)
         else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+            return _error_response(f"Unknown tool: {name}", "unknown_tool")
     except SlackApiError as e:
         logger.error(f"Slack API error in {name}: {str(e)}")
-        return [TextContent(type="text", text=f"Slack API Error: {e.response['error']}")]
+        return _error_response(
+            f"Slack API Error: {e.response['error']}",
+            "slack_api_error",
+            {"tool": name}
+        )
     except Exception as e:
         logger.error(f"Unexpected error in {name}: {str(e)}")
-        return [TextContent(type="text", text=f"Unexpected error: {str(e)}")]
+        return _error_response(f"Unexpected error: {str(e)}", "unexpected_error", {"tool": name})
 
 
 # ==================== Channel Handlers ====================
@@ -960,7 +1097,7 @@ async def handle_get_channel_info(arguments: dict) -> list[TextContent]:
     channel_id = _get_channel_id(channel)
 
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
     result = slack_client.conversations_info(channel=channel_id)
     ch = result["channel"]
@@ -1093,7 +1230,7 @@ async def handle_send_message(arguments: dict) -> list[TextContent]:
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
     kwargs = {"channel": channel_id, "text": text}
     if thread_ts:
@@ -1116,10 +1253,10 @@ async def handle_send_dm(arguments: dict) -> list[TextContent]:
     user = arguments["user"]
     text = arguments["text"]
 
-    user_id_result = _get_user_id(user)
+    user_id_result = await _get_user_id_async(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
     if error_msg:
-        return [TextContent(type="text", text=error_msg)]
+        return _error_response(error_msg, "user_error")
 
     # Open DM conversation
     dm_result = slack_client.conversations_open(users=[user_id])
@@ -1189,11 +1326,11 @@ async def handle_list_users(arguments: dict) -> list[TextContent]:
 async def handle_get_user_info(arguments: dict) -> list[TextContent]:
     """Get user details."""
     user = arguments["user"]
-    user_id_result = _get_user_id(user)
+    user_id_result = await _get_user_id_async(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
 
     if error_msg:
-        return [TextContent(type="text", text=error_msg)]
+        return _error_response(error_msg, "user_error")
 
     result = slack_client.users_info(user=user_id)
     u = result["user"]
@@ -1219,11 +1356,11 @@ async def handle_get_user_info(arguments: dict) -> list[TextContent]:
 async def handle_get_user_presence(arguments: dict) -> list[TextContent]:
     """Get user presence status."""
     user = arguments["user"]
-    user_id_result = _get_user_id(user)
+    user_id_result = await _get_user_id_async(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
 
     if error_msg:
-        return [TextContent(type="text", text=error_msg)]
+        return _error_response(error_msg, "user_error")
 
     result = slack_client.users_getPresence(user=user_id)
 
@@ -1245,7 +1382,7 @@ async def handle_get_thread_replies(arguments: dict) -> list[TextContent]:
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
     result = slack_client.conversations_replies(channel=channel_id, ts=thread_ts)
 
@@ -1280,7 +1417,7 @@ async def handle_add_reaction(arguments: dict) -> list[TextContent]:
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
     slack_client.reactions_add(channel=channel_id, timestamp=timestamp, name=emoji)
 
@@ -1380,7 +1517,7 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     # Use user client for DM operations (required for reading DMs between users)
     client = _get_client_for_operation("dm")
 
-    user_id_result = _get_user_id(user)
+    user_id_result = await _get_user_id_async(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
     if error_msg:
         # Return JSON error for consistency
@@ -1400,8 +1537,16 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
         except SlackApiError as e:
             user_name = _get_user_name(user_id)
             if "missing_scope" in str(e):
-                return [TextContent(type="text", text=f"No existing DM conversation found with {user_name}. To start a new conversation, the User Token needs 'im:write' scope.")]
-            return [TextContent(type="text", text=f"Could not access DM with {user_name}: {e.response['error']}")]
+                return _error_response(
+                    f"No existing DM conversation found with {user_name}. To start a new conversation, the User Token needs 'im:write' scope.",
+                    "missing_scope",
+                    {"user": user_name, "required_scope": "im:write"}
+                )
+            return _error_response(
+                f"Could not access DM with {user_name}: {e.response['error']}",
+                "slack_api_error",
+                {"user": user_name}
+            )
 
     # Build history query
     kwargs = {"channel": dm_channel, "limit": limit}
@@ -1415,7 +1560,10 @@ async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
         error_hint = ""
         if "missing_scope" in str(e):
             error_hint = "\n\nHint: Reading DM history requires im:history scope on your User Token."
-        return [TextContent(type="text", text=f"Could not read DM history: {e.response['error']}{error_hint}")]
+        return _error_response(
+            f"Could not read DM history: {e.response['error']}{error_hint}",
+            "slack_api_error"
+        )
 
     messages = []
     for msg in result["messages"]:
@@ -1450,12 +1598,12 @@ async def handle_get_user_messages_in_channel(arguments: dict) -> list[TextConte
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
-    user_id_result = _get_user_id(user)
+    user_id_result = await _get_user_id_async(user)
     is_ambiguous, user_id, error_msg = _check_ambiguous_user(user_id_result, user)
     if error_msg:
-        return [TextContent(type="text", text=error_msg)]
+        return _error_response(error_msg, "user_error")
 
     # Build history query
     kwargs = {"channel": channel_id, "limit": limit}
@@ -1509,14 +1657,30 @@ async def handle_list_dms(arguments: dict) -> list[TextContent]:
         user_id = dm.get("user")
 
         if is_mpim or (not is_im and not user_id):
-            # Group DM - get member names from channel name or members list
-            dm_name = dm.get("name", "")
-            # MPIM names are like "mpdm-user1--user2--user3-1"
-            member_names = dm.get("purpose", {}).get("value", dm_name)
+            # Group DM - resolve actual member names
+            dm_id = dm["id"]
+            try:
+                members_result = client.conversations_members(channel=dm_id, limit=20)
+                member_ids = members_result.get("members", [])
+                # Resolve member names, excluding "slackbot"
+                resolved_names = []
+                for mid in member_ids:
+                    name = _get_user_name_fast(mid)
+                    if name and name.lower() != "slackbot" and name != mid:
+                        resolved_names.append(name)
+                if resolved_names:
+                    group_name = ", ".join(resolved_names[:5])
+                    if len(resolved_names) > 5:
+                        group_name += f" +{len(resolved_names) - 5} more"
+                else:
+                    group_name = dm.get("purpose", {}).get("value") or dm.get("name", "Group DM")
+            except Exception:
+                group_name = dm.get("purpose", {}).get("value") or dm.get("name", "Group DM")
+
             dms.append({
                 "channel_id": dm["id"],
                 "type": "group_dm",
-                "name": member_names or dm_name,
+                "name": group_name,
                 "is_open": dm.get("is_open", False),
                 "num_members": dm.get("num_members", 0),
             })
@@ -1582,7 +1746,7 @@ async def handle_get_channel_activity(arguments: dict) -> list[TextContent]:
 
     channel_id = _get_channel_id(channel)
     if not channel_id:
-        return [TextContent(type="text", text=f"Channel not found: {channel}")]
+        return _error_response(f"Channel not found: {channel}", "not_found", {"channel": channel})
 
     oldest = _parse_date_filter(days_ago)
     kwargs = {"channel": channel_id, "limit": 200}
@@ -1638,7 +1802,7 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
     hours_ago = arguments.get("hours_ago", 24)
     include_channels = arguments.get("include_channels", True)
     include_dms = arguments.get("include_dms", True)
-    max_per_convo = arguments.get("max_messages_per_conversation", 20)
+    max_per_convo = arguments.get("max_messages_per_conversation", 10)  # Reduced from 20
 
     # Calculate time cutoff
     cutoff_time = datetime.now() - timedelta(hours=hours_ago)
@@ -1662,11 +1826,14 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
         try:
             result = await loop.run_in_executor(
                 _executor,
-                lambda: client.conversations_list(types="im,mpim", limit=200)
+                lambda: client.conversations_list(types="im,mpim", limit=50)  # Reduced from 200
             )
-            return result.get("channels", [])
+            return result.get("channels", [])[:30]  # Limit to 30 most recent DMs
         except SlackApiError as e:
             errors.append(f"Listing DMs: {e.response.get('error', str(e))}")
+            return []
+        except Exception as e:
+            errors.append(f"Listing DMs: {str(e)}")
             return []
 
     async def fetch_channel_list():
@@ -1675,11 +1842,11 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
                 _executor,
                 lambda: client.users_conversations(
                     types="public_channel,private_channel",
-                    limit=100,
+                    limit=30,  # Reduced from 100
                     exclude_archived=True
                 )
             )
-            return result.get("channels", [])
+            return result.get("channels", [])[:20]  # Limit to 20 channels
         except SlackApiError as e:
             errors.append(f"Listing channels: {e.response.get('error', str(e))}")
             return []
@@ -1712,8 +1879,28 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
 
             # Get conversation name
             if is_mpim:
-                # Group DM - use name or purpose
-                convo_name = dm.get("purpose", {}).get("value") or dm.get("name", "Group DM")
+                # Group DM - resolve actual member names
+                try:
+                    members_result = await loop.run_in_executor(
+                        _executor,
+                        lambda: client.conversations_members(channel=dm_id, limit=20)
+                    )
+                    member_ids = members_result.get("members", [])
+                    # Resolve member names, excluding "slackbot"
+                    member_names = []
+                    for mid in member_ids:
+                        name = _get_user_name_fast(mid)
+                        if name and name.lower() != "slackbot" and name != mid:
+                            member_names.append(name)
+                    if member_names:
+                        convo_name = ", ".join(member_names[:5])  # Limit to 5 names
+                        if len(member_names) > 5:
+                            convo_name += f" +{len(member_names) - 5} more"
+                    else:
+                        convo_name = dm.get("purpose", {}).get("value") or "Group DM"
+                except Exception as e:
+                    # Fallback to purpose or generic name
+                    convo_name = dm.get("purpose", {}).get("value") or "Group DM"
             else:
                 # 1-on-1 DM
                 user_id = dm.get("user", "")
@@ -1831,18 +2018,36 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(response, indent=2))]
 
 
-def main():
+def main() -> None:
     """Run the Slack MCP server."""
     import asyncio
+    import atexit
+    import signal
+    from types import FrameType
     from mcp.server.stdio import stdio_server
 
-    async def run():
-        async with stdio_server() as (read_stream, write_stream):
-            await app.run(
-                read_stream,
-                write_stream,
-                app.create_initialization_options(),
-            )
+    # Register shutdown handler for graceful cleanup
+    atexit.register(shutdown_executor)
+
+    def signal_handler(signum: int, frame: Optional[FrameType]) -> None:
+        """Handle shutdown signals."""
+        logger.info(f"Received signal {signum}, shutting down...")
+        shutdown_executor()
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    async def run() -> None:
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await app.run(
+                    read_stream,
+                    write_stream,
+                    app.create_initialization_options(),
+                )
+        finally:
+            shutdown_executor()
 
     asyncio.run(run())
 

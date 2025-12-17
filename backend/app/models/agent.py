@@ -7,8 +7,13 @@ querying across multiple data sources simultaneously.
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
+
+
+def _utc_now() -> datetime:
+    """Return current UTC time as timezone-aware datetime."""
+    return datetime.now(timezone.utc)
 
 
 class AgentTaskStatus(str, Enum):
@@ -88,7 +93,7 @@ class SourceQueryResult(BaseModel):
     
     # Timestamp when this result was generated
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, 
+        default_factory=_utc_now,
         description="When result was generated"
     )
 
@@ -218,7 +223,7 @@ class MultiSourceResponse(BaseModel):
     
     # Timestamp
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, 
+        default_factory=_utc_now,
         description="Response timestamp"
     )
 
@@ -246,9 +251,11 @@ class AgentStreamEvent(BaseModel):
     
     # Timestamp
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, 
+        default_factory=_utc_now,
         description="Event timestamp"
     )
+
+
 
 
 

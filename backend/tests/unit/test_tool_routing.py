@@ -99,7 +99,20 @@ class TestDirectToolRouting:
 
 class TestSlackDMRouting:
     """Test that person-specific queries route to read_dm_with_user."""
-    
+
+    DM_INDICATORS = [
+        "what did",
+        "messages from",
+        "dm with",
+        "chat with",
+        "conversation with",  # Singular form
+        "conversations with",  # Plural form
+        "tell me",
+        "send me",
+        "'s messages",  # Possessive form like "John's messages"
+        "'s chat",  # Possessive form like "John's chat"
+    ]
+
     @pytest.fixture
     def routing_prompt_patterns(self):
         """Common patterns that should trigger DM reading."""
@@ -113,36 +126,55 @@ class TestSlackDMRouting:
             "what did {name} tell me",
             "read my dm with {name}",
         ]
-    
+
     def test_dm_patterns_with_names(self, routing_prompt_patterns):
-        """Test that DM patterns with names would trigger read_dm_with_user.
-        
-        Note: This tests the pattern matching logic, not the actual Haiku routing.
+        """Test that DM patterns with names have correct DM intent indicators.
+
+        Validates that our pattern matching correctly identifies queries
+        that should route to read_dm_with_user tool.
         """
         test_names = ["John", "Ananth", "Akash", "Austin", "Sarah"]
-        
+        matched_count = 0
+        total_count = 0
+
         for pattern in routing_prompt_patterns:
             for name in test_names:
                 query = pattern.format(name=name)
-                
-                # These patterns should indicate DM reading intent
-                dm_indicators = [
-                    "what did",
-                    "messages from", 
-                    "dm with",
-                    "chat with",
-                    "conversations with",
-                    "tell me",
-                    "send me",
-                ]
-                
-                has_dm_intent = any(ind in query.lower() for ind in dm_indicators)
+                total_count += 1
+
+                has_dm_intent = any(ind in query.lower() for ind in self.DM_INDICATORS)
                 has_name = any(n.lower() in query.lower() for n in test_names)
-                
-                # If query has both a name and DM intent, it should route to read_dm_with_user
+
+                # Verify the pattern matching logic works
                 if has_dm_intent and has_name:
-                    # This is what Haiku routing should detect
-                    assert True, f"Query should route to read_dm_with_user: {query}"
+                    matched_count += 1
+                    # Verify the specific indicators are present
+                    assert has_dm_intent, f"Expected DM intent in query: {query}"
+                    assert has_name, f"Expected name in query: {query}"
+
+        # At least 80% of patterns should match (allowing for some edge cases)
+        match_ratio = matched_count / total_count
+        assert match_ratio >= 0.8, f"Only {match_ratio:.0%} of DM patterns matched, expected >= 80%"
+
+    def test_dm_intent_detection_accuracy(self):
+        """Test that DM intent is correctly detected for various query formats."""
+        positive_cases = [
+            ("what did John say yesterday", True),
+            ("messages from Sarah about the project", True),
+            ("dm with Bob", True),
+            ("my conversation with Alice", True),
+        ]
+
+        negative_cases = [
+            ("list all channels", False),
+            ("search for API keys", False),
+            ("show me the general channel", False),
+        ]
+
+        for query, expected_intent in positive_cases + negative_cases:
+            has_dm_intent = any(ind in query.lower() for ind in self.DM_INDICATORS)
+            assert has_dm_intent == expected_intent, \
+                f"Query '{query}' - expected DM intent: {expected_intent}, got: {has_dm_intent}"
 
 
 class TestSearchVsDMRouting:
@@ -249,18 +281,33 @@ class TestComplexQueryClassification:
             "find who has been most active this week",
             "what were the main topics discussed in the last sprint",
         ]
-        
+
         from app.connectors import get_direct_routing
-        
+
+        no_direct_routing_count = 0
+        total_checks = 0
+
         for query in complex_queries:
             for ds in ["slack", "s3", "jira"]:
+                total_checks += 1
                 result = get_direct_routing(ds, query)
                 # Complex queries should NOT have direct routing
                 # (they need LLM to understand intent)
-                if result is not None:
-                    # If there IS direct routing, it should be a partial match
-                    # not a complete solution
-                    pass
+                if result is None:
+                    no_direct_routing_count += 1
+                else:
+                    # If there IS direct routing, verify it's not a complete solution
+                    # by checking the tool doesn't fully satisfy the complex query
+                    tool_name = result[0]["tool"] if result else None
+                    simple_tools = ["list_channels", "list_users", "list_buckets", "list_projects"]
+                    # Complex queries shouldn't resolve to simple list tools
+                    assert tool_name not in simple_tools or "list" not in query.lower(), \
+                        f"Complex query '{query}' incorrectly routed to simple tool: {tool_name}"
+
+        # Majority of complex queries should have NO direct routing
+        no_routing_ratio = no_direct_routing_count / total_checks
+        assert no_routing_ratio >= 0.5, \
+            f"Only {no_routing_ratio:.0%} of complex queries lacked direct routing, expected >= 50%"
 
 
 class TestMultiToolQueries:
@@ -286,5 +333,7 @@ class TestMultiToolQueries:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
 
 

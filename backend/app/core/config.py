@@ -138,6 +138,19 @@ class Settings(BaseSettings):
     # Application version (for health checks)
     version: str = "1.0.0"
 
+    # LLM Model Configuration
+    llm_model_synthesis: str = "claude-sonnet-4-5-20250929"  # For result synthesis
+    llm_model_routing: str = "claude-3-5-haiku-20241022"  # For fast source detection
+    llm_max_tokens_synthesis: int = 4096
+    llm_max_tokens_routing: int = 1000
+
+    # Agent Input Validation
+    agent_max_query_length: int = 10000  # Max characters in query
+    agent_max_sources: int = 5  # Max sources that can be queried
+    agent_max_suggestions: int = 10  # Max source suggestions
+    agent_session_ttl_minutes: int = 60  # Session expiry time
+    agent_query_timeout_seconds: int = 60  # Per-source query timeout
+
     @property
     def cookie_settings(self) -> dict:
         """Get cookie security settings based on environment."""

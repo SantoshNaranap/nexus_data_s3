@@ -16,6 +16,8 @@ from typing import List, Optional
 from anthropic import APIError, APIConnectionError, RateLimitError
 
 from app.services.claude_client import claude_client
+from app.core.config import settings
+from app.core.security import sanitize_for_llm
 from app.models.agent import SourceQueryResult, AgentPlan
 
 # Configure logging
@@ -175,24 +177,27 @@ Response Format:
         
         # Format results for synthesis
         formatted_results = self._format_source_results(results)
-        
+
+        # Sanitize user query to prevent prompt injection
+        sanitized_query = sanitize_for_llm(query, max_length=5000)
+
         # Build context about what was queried
         sources_queried = [r.datasource for r in results]
         sources_succeeded = [r.datasource for r in successful_results]
         sources_failed = [r.datasource for r in results if not r.success]
-        
+
         context = f"""
 Sources queried: {', '.join(sources_queried)}
 Successful: {', '.join(sources_succeeded)}
 Failed: {', '.join(sources_failed) if sources_failed else 'None'}
 """
-        
+
         # Add plan context if available
         if plan:
             context += f"\nPlan reasoning: {plan.plan_reasoning}"
-        
-        # Build synthesis prompt
-        synthesis_prompt = f"""USER QUERY: "{query}"
+
+        # Build synthesis prompt with sanitized query
+        synthesis_prompt = f"""USER QUERY: "{sanitized_query}"
 
 QUERY CONTEXT:
 {context}
@@ -208,10 +213,10 @@ Synthesize information from all successful sources and highlight any cross-sourc
         logger.info(f"Synthesizing results from {len(successful_results)} sources")
         
         try:
-            # Use Sonnet for high-quality synthesis
+            # Use configured model for high-quality synthesis
             response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
+                model=settings.llm_model_synthesis,
+                max_tokens=settings.llm_max_tokens_synthesis,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],
             )
@@ -289,13 +294,16 @@ Synthesize information from all successful sources and highlight any cross-sourc
         
         # Format results
         formatted_results = self._format_source_results(results)
-        
+
+        # Sanitize user query to prevent prompt injection
+        sanitized_query = sanitize_for_llm(query, max_length=5000)
+
         sources_queried = [r.datasource for r in results]
         sources_succeeded = [r.datasource for r in successful_results]
-        
+
         context = f"Sources: {', '.join(sources_queried)}"
-        
-        synthesis_prompt = f"""USER QUERY: "{query}"
+
+        synthesis_prompt = f"""USER QUERY: "{sanitized_query}"
 
 {context}
 
@@ -307,10 +315,10 @@ DATA FROM SOURCES:
 Synthesize a comprehensive response to the user's query."""
 
         try:
-            # Stream the synthesis
+            # Stream the synthesis using configured model
             stream = self.client.messages.stream(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
+                model=settings.llm_model_synthesis,
+                max_tokens=settings.llm_max_tokens_synthesis,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],
             )
@@ -362,6 +370,8 @@ Synthesize a comprehensive response to the user's query."""
 
 # Create global instance for import
 result_synthesizer = ResultSynthesizer()
+
+
 
 
 

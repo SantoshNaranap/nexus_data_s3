@@ -13,14 +13,17 @@ Endpoints:
 
 import logging
 import json
-from fastapi import APIRouter, HTTPException, Request, Depends
+import re
+from fastapi import APIRouter, HTTPException, Request, Depends, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.agent_service import agent_orchestrator
 from app.middleware.auth import get_current_user_optional as get_current_user
 from app.core.database import get_db
+from app.core.config import settings
 from app.models.database import User
 from app.models.agent import (
     MultiSourceRequest,
@@ -28,6 +31,33 @@ from app.models.agent import (
     DataSourceRelevance,
     AgentStreamEvent,
 )
+
+
+# Input validation models
+class SuggestRequest(BaseModel):
+    """Request model for source suggestions with validation."""
+    query: str = Field(..., min_length=1, max_length=10000, description="Query to analyze")
+    max_suggestions: int = Field(default=5, ge=1, le=10, description="Max suggestions to return")
+
+    @field_validator("query")
+    @classmethod
+    def sanitize_query(cls, v: str) -> str:
+        """Basic sanitization of query input."""
+        # Remove null bytes and control characters (except newlines/tabs)
+        v = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', v)
+        return v.strip()
+
+
+class DetectRequest(BaseModel):
+    """Request model for multi-source detection with validation."""
+    query: str = Field(..., min_length=1, max_length=10000, description="Query to analyze")
+
+    @field_validator("query")
+    @classmethod
+    def sanitize_query(cls, v: str) -> str:
+        """Basic sanitization of query input."""
+        v = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', v)
+        return v.strip()
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -99,9 +129,12 @@ async def execute_multi_source_query(
         
         return response
         
+    except ValueError as e:
+        logger.warning(f"Multi-source query validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Multi-source query failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/query/stream")
@@ -195,26 +228,28 @@ async def execute_multi_source_query_stream(
 
 @router.post("/suggest", response_model=List[DataSourceRelevance])
 async def suggest_sources(
-    query: str,
-    max_suggestions: int = 5,
+    request: SuggestRequest,
+    req: Request,
+    user: Optional[User] = Depends(get_current_user),
 ):
     """
     Get source suggestions for a query without executing it.
-    
+
     Useful for UI previews, query planning, or helping users understand
     which data sources will be queried.
-    
+
     Args:
-        query: The natural language query to analyze
-        max_suggestions: Maximum number of source suggestions (default 5)
-    
+        request: SuggestRequest containing:
+            - query: The natural language query to analyze
+            - max_suggestions: Maximum number of source suggestions (default 5, max 10)
+
     Returns:
         List of DataSourceRelevance with:
             - datasource: Source identifier
             - confidence: Relevance score (0-1)
             - reasoning: Why this source is relevant
             - suggested_approach: How to query this source
-    
+
     Example:
         ```json
         POST /api/agent/suggest
@@ -222,7 +257,7 @@ async def suggest_sources(
             "query": "Show me all bugs assigned to John",
             "max_suggestions": 3
         }
-        
+
         Response:
         [
             {
@@ -235,40 +270,49 @@ async def suggest_sources(
         ```
     """
     try:
+        # Use validated and sanitized query
         suggestions = await agent_orchestrator.suggest_sources(
-            query=query,
-            max_suggestions=max_suggestions,
+            query=request.query,
+            max_suggestions=min(request.max_suggestions, settings.agent_max_suggestions),
         )
         return suggestions
-        
+
+    except ValueError as e:
+        logger.warning(f"Source suggestion validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Source suggestion failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/detect")
-async def detect_multi_source(query: str):
+async def detect_multi_source(
+    request: DetectRequest,
+    req: Request,
+    user: Optional[User] = Depends(get_current_user),
+):
     """
     Detect if a query should use multi-source processing.
-    
+
     Quickly analyzes the query to determine if it would benefit from
     querying multiple data sources simultaneously.
-    
+
     Args:
-        query: The natural language query to analyze
-    
+        request: DetectRequest containing:
+            - query: The natural language query to analyze
+
     Returns:
         Dict with:
             - is_multi_source: Whether multi-source is recommended
             - suggested_sources: List of potentially relevant sources
-    
+
     Example:
         ```json
         POST /api/agent/detect
         {
             "query": "Compare my JIRA tasks with recent emails"
         }
-        
+
         Response:
         {
             "is_multi_source": true,
@@ -278,12 +322,15 @@ async def detect_multi_source(query: str):
         ```
     """
     try:
+        # Use validated and sanitized query
+        query = request.query
+
         # Check if multi-source processing is appropriate
         is_multi_source = await agent_orchestrator.detect_if_multi_source(query)
-        
+
         # Get source suggestions
         suggestions = await agent_orchestrator.suggest_sources(query, max_suggestions=3)
-        
+
         return {
             "is_multi_source": is_multi_source,
             "suggested_sources": [s.datasource for s in suggestions],
@@ -294,27 +341,33 @@ async def detect_multi_source(query: str):
             "reasoning": "Query appears to reference multiple data types" if is_multi_source
                         else "Query can be handled by a single source",
         }
-        
+
+    except ValueError as e:
+        logger.warning(f"Multi-source detection validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Multi-source detection failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sources")
-async def get_available_sources():
+async def get_available_sources(
+    req: Request,
+    user: Optional[User] = Depends(get_current_user),
+):
     """
     Get list of all available data sources for multi-source queries.
-    
+
     Returns metadata about each configured data source including
     its capabilities and status.
-    
+
     Returns:
         List of available data sources with:
             - id: Source identifier
             - name: Human-readable name
             - description: What this source provides
             - enabled: Whether source is currently available
-    
+
     Example Response:
         ```json
         [
@@ -333,8 +386,14 @@ async def get_available_sources():
         ]
         ```
     """
-    from app.services.mcp_service import mcp_service
-    return mcp_service.get_available_datasources()
+    try:
+        from app.services.mcp_service import mcp_service
+        return mcp_service.get_available_datasources()
+    except Exception as e:
+        logger.error(f"Get sources failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 
 
 
