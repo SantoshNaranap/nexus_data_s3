@@ -261,11 +261,42 @@ async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
 
     jql = parsed["jql"]
     is_count = parsed["is_count"]
+    is_schedule_query = parsed.get("is_schedule_query", False)
+    person_not_found = parsed.get("person_not_found")
     matched_entities = parsed["matched_entities"]
 
-    # Execute the JQL query
+    # If a person was mentioned but not found, return an error message
+    if person_not_found:
+        # Get list of available assignees for suggestions
+        try:
+            available_assignees = query_parser._get_assignees()
+            # Find similar names
+            from difflib import get_close_matches
+            similar = get_close_matches(person_not_found.lower(),
+                                        [a.split()[0].lower() for a in available_assignees],
+                                        n=5, cutoff=0.4)
+            suggestions = []
+            for s in similar:
+                for a in available_assignees:
+                    if a.split()[0].lower() == s:
+                        suggestions.append(a)
+                        break
+        except Exception:
+            suggestions = []
+
+        response = {
+            "error": f"Person '{person_not_found}' not found in JIRA",
+            "query": query,
+            "person_searched": person_not_found,
+            "suggestions": suggestions[:5] if suggestions else [],
+            "hint": "Try using their full name as it appears in JIRA, or check if they have any assigned issues.",
+        }
+        return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+    # Execute the JQL query - include duedate and project for better analysis
     max_results = 50 if not is_count else 100
-    issues = jira_client.search_issues(jql, maxResults=max_results, fields="key,summary,status,assignee")
+    fields = "key,summary,status,assignee,duedate,project"
+    issues = jira_client.search_issues(jql, maxResults=max_results, fields=fields)
 
     # Format results
     results = []
@@ -274,19 +305,37 @@ async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
             "key": issue.key,
             "summary": issue.fields.summary,
             "status": issue.fields.status.name,
+            "project": issue.fields.project.key if hasattr(issue.fields, "project") and issue.fields.project else None,
         }
         if hasattr(issue.fields, "assignee") and issue.fields.assignee:
             issue_data["assignee"] = issue.fields.assignee.displayName
+        if hasattr(issue.fields, "duedate") and issue.fields.duedate:
+            issue_data["duedate"] = issue.fields.duedate
         results.append(issue_data)
 
-    # Build response
+    # Build response with additional context for schedule queries
     response = {
         "query": query,
         "jql": jql,
         "matched_entities": matched_entities,
         "total": len(results),
+        "is_schedule_analysis": is_schedule_query,
         "issues": results,
     }
+
+    # Add schedule summary if this was a schedule query
+    if is_schedule_query and results:
+        projects_affected = {}
+        for issue in results:
+            proj = issue.get("project", "Unknown")
+            if proj not in projects_affected:
+                projects_affected[proj] = []
+            projects_affected[proj].append(issue["key"])
+        response["schedule_summary"] = {
+            "overdue_count": len(results),
+            "projects_affected": {k: len(v) for k, v in projects_affected.items()},
+            "issues_by_project": projects_affected,
+        }
 
     return [TextContent(type="text", text=json.dumps(response, indent=2))]
 

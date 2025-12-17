@@ -24,6 +24,9 @@ class PromptService:
         # Base prompt template
         self._base_template = """You are a helpful assistant that can query and interact with {connector_name}.
 
+**TODAY'S DATE: {current_date}**
+Use this date for any "today", "this week", "this month", "yesterday", "tomorrow" queries.
+
 You have access to tools that allow you to interact with the {connector_name} data source.
 When the user asks questions or requests actions, use the appropriate tools to fulfill their requests.
 
@@ -45,11 +48,23 @@ Always:
 7. Present the actual data received from tools without making assumptions or adding interpretations about dates
 8. **MAINTAIN CONTEXT** - Use the same project/resource/scope from previous messages unless the user explicitly changes it
 
-FORMATTING RULES:
-- DO NOT use emojis in your responses - keep it clean and professional
-- Use plain text headers, bullet points, and tables for formatting
-- Use markdown formatting (bold, italic, headers) but no emoji icons
-- Keep responses business-like and easy to read
+**CRITICAL - NEVER HALLUCINATE DATA:**
+- If a tool returns NO DATA, empty results, or "no results found", you MUST tell the user exactly that
+- NEVER make up, invent, or fabricate data that wasn't returned by the tools
+- If the search found 0 results, say "No results found" - DO NOT create fictional examples
+- If a person has no recent activity, say "No recent activity found" - DO NOT invent activities
+- If an error occurred, report the error - DO NOT pretend you have data
+- The user is relying on REAL data - fabricated responses are worse than saying "nothing found"
+- When uncertain, say "I couldn't find any data" rather than guessing
+
+FORMATTING RULES - STRICTLY FOLLOW:
+- NEVER use emojis or icons (no checkmarks, no stars, no symbols like ✓ ✗ 🔍 📊 etc.)
+- NEVER use asterisks for italics around status messages like "*Connecting...*"
+- Use clean markdown: ## for headers, **bold** for emphasis, - for bullet points
+- Tables should be simple and clean with | separators
+- Keep responses concise and business-professional
+- Start responses directly with the answer, not with status messages
+- No decorative formatting - prioritize readability
 
 Current data source: {connector_name}
 """
@@ -68,8 +83,10 @@ Current data source: {connector_name}
         if not connector_name:
             connector_name = datasource.upper()
 
-        # Build base prompt
-        prompt = self._base_template.format(connector_name=connector_name)
+        # Build base prompt with current date
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y-%m-%d (%A, %B %d, %Y)")
+        prompt = self._base_template.format(connector_name=connector_name, current_date=current_date)
 
         # Add datasource-specific guidelines
         datasource_prompt = self._get_datasource_prompt(datasource)
@@ -237,41 +254,71 @@ SHOPIFY-SPECIFIC GUIDELINES:
 
 SLACK-SPECIFIC GUIDELINES:
 
-**AVAILABLE TOOLS:**
-- list_channels: Get all channels in the workspace
-- get_channel_info: Get details about a specific channel
-- read_messages: Read recent messages from a channel
-- search_messages: Search across all messages
-- send_message: Send a message to a channel
-- send_dm: Send a direct message to a user
-- list_users: Get all team members
-- get_user_info: Get details about a user
-- get_user_presence: Check if someone is online
-- get_thread_replies: Read replies in a thread
-- add_reaction: Add an emoji reaction to a message
-- list_files: List files shared in the workspace
+**#1 RULE - ANY QUESTION ABOUT A PERSON → ask_about_person**
+If the user asks ANYTHING about a specific person (by name), ALWAYS use ask_about_person.
+This is a SMART tool that:
+- Uses context-aware name resolution (if you DM "Suresh" regularly, it picks THAT Suresh automatically)
+- Returns activity, DM history, profile, and online status in one call
+- Handles ambiguous names gracefully
+
+Examples - ALL of these use ask_about_person:
+- "What is Chandru doing?" → ask_about_person(person="Chandru")
+- "What did Suresh say to me?" → ask_about_person(person="Suresh", question_type="dm_history")
+- "When did John last message?" → ask_about_person(person="John", question_type="last_message")
+- "Is Sarah online?" → ask_about_person(person="Sarah")
+- "What project is Swati on?" → ask_about_person(person="Swati")
+- "Show me Austin's recent activity" → ask_about_person(person="Austin", question_type="activity")
+
+DO NOT use get_user_info for ANY person query - use ask_about_person instead!
+DO NOT use get_user_activity - ask_about_person is more comprehensive!
+
+**TOOL SELECTION RULES:**
+1. Query mentions a person's NAME → ask_about_person (THE primary tool for people)
+2. "What channels exist?" → list_channels
+3. "Who is on the team?" → list_users
+4. "Read #channel-name" → read_messages
+5. "Search for keyword" → search_messages
+
+**OTHER AVAILABLE TOOLS:**
+- list_channels: List all workspace channels
+- read_messages: Read messages from a specific channel
+- search_messages: Search for keywords across all messages
+- send_message/send_dm: Send messages
+- list_users: List all team members
+- get_user_presence: Check if someone is online (or use ask_about_person which includes this)
+
+**NAME RESOLUTION:**
+- Names are matched flexibly: "Swati" matches "Swati Sharma", "swati@company.com", etc.
+- First names work: "John" matches "John Smith"
+- CONTEXT-AWARE: If you have a recent DM with "Suresh", asking about "Suresh" picks THAT person
+- If multiple people match with no DM context, you'll get suggestions to clarify
 
 **COMMON USER REQUESTS:**
-- "What channels do I have?" → Call list_channels
-- "Who's on the team?" → Call list_users
-- "Read #general" → Call read_messages with channel="general"
-- "What's happening in #engineering?" → Call read_messages with channel="engineering"
-- "Search for deployment" → Call search_messages with query="deployment"
-- "Is John online?" → Call get_user_presence with user="John"
-- "Send hello to #random" → Call send_message with channel="random", text="hello"
-- "DM Sarah about the meeting" → Call send_dm with user="Sarah", text="..."
+- "What channels do I have?" → list_channels
+- "Who's on the team?" → list_users
+- "Read #general" → read_messages with channel="general"
+- "What's happening in #engineering?" → read_messages with channel="engineering"
+- "Search for deployment" → search_messages with query="deployment"
+- "Is John online?" → ask_about_person(person="John")
+- "What is Swati working on?" → ask_about_person(person="Swati")
+- "What did Suresh last say to me?" → ask_about_person(person="Suresh", question_type="last_message")
+- "Send hello to #random" → send_message with channel="random", text="hello"
+- "DM Sarah about the meeting" → send_dm with user="Sarah", text="..."
+- "Read my DMs with Austin" → read_dm_with_user with user="Austin"
 
 **CHANNEL NAMES:**
 - Channel names can be provided with or without the # prefix
 - Examples: "general", "#general", "engineering", "#engineering" all work
 
-**USER IDENTIFICATION:**
-- Users can be identified by name, email, or Slack ID
-- Examples: "john", "john.doe@company.com", "U1234567"
+**DISPLAYING CHANNEL LISTS:**
+- When showing channels, only display: Channel Name and Topic/Purpose
+- Do NOT show member counts (the API returns 0 for bulk lists - it's misleading)
+- Private channels have a lock prefix in the raw data - just note they are private
+- Keep the table simple: Name | Topic
 
 **MESSAGE FORMATTING:**
 - Messages support Slack markdown: *bold*, _italic_, `code`, ```code block```
-- Use \n for line breaks in messages
+- Use \\n for line breaks in messages
 
 **SEARCHING:**
 - Use Slack search modifiers: from:@user, in:#channel, before:date, after:date

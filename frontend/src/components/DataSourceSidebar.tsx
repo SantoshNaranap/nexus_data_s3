@@ -1,5 +1,14 @@
 import type { DataSource } from '../types'
-import { DATA_SOURCE_ICONS } from '../constants'
+import DataSourceIcon from './DataSourceIcon'
+
+// Special "All Sources" datasource for multi-source queries
+export const ALL_SOURCES_DATASOURCE: DataSource = {
+  id: 'all_sources',
+  name: 'All Sources',
+  description: 'Query across all your connected data sources at once',
+  icon: 'all',
+  enabled: true,
+}
 
 interface DataSourceSidebarProps {
   datasources: DataSource[]
@@ -46,6 +55,54 @@ export default function DataSourceSidebar({
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {/* All Sources option - enabled when 2+ sources are configured */}
+        {configuredDatasources.size >= 2 && (
+          <>
+            <button
+              onClick={() => onSelectDatasource(ALL_SOURCES_DATASOURCE)}
+              className={`w-full text-left p-4 rounded-lg transition-all duration-200 ${
+                selectedDatasource?.id === 'all_sources'
+                  ? 'bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 border-2 border-purple-500'
+                  : 'border-2 border-transparent hover:bg-gradient-to-r hover:from-purple-50/50 hover:to-blue-50/50 dark:hover:from-purple-900/10 dark:hover:to-blue-900/10'
+              }`}
+            >
+              <div className="flex items-start space-x-3">
+                <div className="flex-shrink-0">
+                  <div className="w-7 h-7 bg-gradient-to-br from-purple-500 to-blue-500 rounded-lg flex items-center justify-center">
+                    <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className={`font-medium text-sm truncate ${
+                      selectedDatasource?.id === 'all_sources'
+                        ? 'text-purple-700 dark:text-purple-400'
+                        : 'text-gray-900 dark:text-white'
+                    }`}>
+                      All Sources
+                    </div>
+                    <span className="px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded">
+                      {configuredDatasources.size}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">
+                    Query across all connected sources
+                  </div>
+                </div>
+                {selectedDatasource?.id === 'all_sources' && (
+                  <svg className="w-5 h-5 text-purple-600 dark:text-purple-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </div>
+            </button>
+            <div className="border-t border-gray-200 dark:border-gray-700 my-2"></div>
+          </>
+        )}
+
+        {/* Individual datasources */}
         {datasources.map((datasource) => {
           const isConfigured = configuredDatasources.has(datasource.id)
 
@@ -61,8 +118,8 @@ export default function DataSourceSidebar({
               disabled={!datasource.enabled}
             >
               <div className="flex items-start space-x-3">
-                <div className="text-2xl flex-shrink-0">
-                  {DATA_SOURCE_ICONS[datasource.id] || '📊'}
+                <div className="flex-shrink-0">
+                  <DataSourceIcon datasourceId={datasource.id} size={28} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">

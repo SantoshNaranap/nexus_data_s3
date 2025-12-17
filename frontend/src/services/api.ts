@@ -10,6 +10,7 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
   withCredentials: true,
+  timeout: 10000, // 10 second timeout
 });
 
 export const datasourceApi = {
@@ -56,7 +57,10 @@ export const chatApi = {
     onDone: (metadata?: { sources?: SourceReference[]; followUpQuestions?: string[] }) => void,
     onError: (error: string) => void,
     onAgentStep?: (step: AgentStep) => void,
-    onSource?: (source: SourceReference) => void
+    onSource?: (source: SourceReference) => void,
+    onThinking?: (content: string) => void,
+    onThinkingStart?: () => void,
+    onThinkingEnd?: () => void
   ): Promise<void> => {
     const response = await fetch(`${API_BASE_URL}/api/chat/message/stream`, {
       method: 'POST',
@@ -98,6 +102,21 @@ export const chatApi = {
                   break;
                 case 'content':
                   onChunk(data.content);
+                  break;
+                case 'thinking_start':
+                  if (onThinkingStart) {
+                    onThinkingStart();
+                  }
+                  break;
+                case 'thinking':
+                  if (onThinking) {
+                    onThinking(data.content);
+                  }
+                  break;
+                case 'thinking_end':
+                  if (onThinkingEnd) {
+                    onThinkingEnd();
+                  }
                   break;
                 case 'agent_step':
                   if (onAgentStep) {
@@ -146,6 +165,22 @@ export const chatApi = {
   },
 };
 
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface SignupCredentials {
+  email: string;
+  password: string;
+  name?: string;
+}
+
+export interface AuthResponse {
+  message: string;
+  user: User;
+}
+
 export const authApi = {
   getCurrentUser: async (): Promise<User | null> => {
     try {
@@ -157,12 +192,104 @@ export const authApi = {
     }
   },
 
+  login: async (credentials: LoginCredentials): Promise<AuthResponse> => {
+    const response = await api.post<AuthResponse>('/api/auth/login', credentials);
+    return response.data;
+  },
+
+  signup: async (credentials: SignupCredentials): Promise<AuthResponse> => {
+    const response = await api.post<AuthResponse>('/api/auth/signup', credentials);
+    return response.data;
+  },
+
   logout: async (): Promise<void> => {
     await api.post('/api/auth/logout');
   },
+};
 
-  getGoogleAuthUrl: (): string => {
-    return `${API_BASE_URL}/api/auth/google`;
+// OAuth connection types
+export interface OAuthConnection {
+  id: string;
+  provider: string;
+  provider_email: string | null;
+  token_type: string;
+  expires_at: string | null;
+  scopes: string | null;
+  is_expired: boolean;
+  needs_refresh: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OAuthConnectionStatus {
+  connected: boolean;
+  provider: string;
+  provider_email?: string;
+  expires_at?: string;
+  needs_refresh?: boolean;
+}
+
+export interface OAuthAuthorizeResponse {
+  authorization_url: string;
+}
+
+// Set of providers that use OAuth instead of manual credentials
+export const OAUTH_PROVIDERS = new Set(['google_workspace']);
+
+export const oauthApi = {
+  /**
+   * Get list of available OAuth providers
+   */
+  getProviders: async (): Promise<{ providers: string[] }> => {
+    const response = await api.get<{ providers: string[] }>('/api/oauth/providers');
+    return response.data;
+  },
+
+  /**
+   * Initiate OAuth authorization flow
+   * Returns the authorization URL to redirect the user to
+   */
+  authorize: async (provider: string): Promise<OAuthAuthorizeResponse> => {
+    const response = await api.post<OAuthAuthorizeResponse>(`/api/oauth/${provider}/authorize`);
+    return response.data;
+  },
+
+  /**
+   * List all OAuth connections for the current user
+   */
+  getConnections: async (): Promise<OAuthConnection[]> => {
+    const response = await api.get<OAuthConnection[]>('/api/oauth/connections');
+    return response.data;
+  },
+
+  /**
+   * Get connection status for a specific provider
+   */
+  getConnectionStatus: async (provider: string): Promise<OAuthConnectionStatus> => {
+    const response = await api.get<OAuthConnectionStatus>(`/api/oauth/connections/${provider}/status`);
+    return response.data;
+  },
+
+  /**
+   * Disconnect an OAuth provider
+   */
+  disconnect: async (provider: string): Promise<void> => {
+    await api.delete(`/api/oauth/connections/${provider}`);
+  },
+
+  /**
+   * Manually refresh OAuth tokens
+   */
+  refresh: async (provider: string): Promise<{ message: string; expires_at?: string }> => {
+    const response = await api.post(`/api/oauth/connections/${provider}/refresh`);
+    return response.data;
+  },
+
+  /**
+   * Check if a datasource uses OAuth
+   */
+  isOAuthProvider: (datasource: string): boolean => {
+    return OAUTH_PROVIDERS.has(datasource);
   },
 };
 

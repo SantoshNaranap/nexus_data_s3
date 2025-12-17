@@ -1,10 +1,13 @@
 """Chat API routes."""
 
+import logging
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 import json
+
+logger = logging.getLogger(__name__)
 
 from app.models.chat import ChatRequest, ChatResponse, SessionCreate, Session
 from app.services.chat_service import chat_service
@@ -115,43 +118,69 @@ async def send_message_stream(
                 from anthropic import Anthropic
                 from app.core.config import settings
 
+                # Data source specific hints for better questions
+                datasource_hints = {
+                    "slack": "channels, users, messages, threads, reactions, DMs, keywords, time periods",
+                    "mysql": "tables, columns, records, aggregations, filters, joins, trends over time",
+                    "s3": "buckets, files, folders, file types, sizes, recent uploads, metadata",
+                    "jira": "issues, sprints, assignees, statuses, priorities, blockers, deadlines",
+                    "google_workspace": "docs, sheets, emails, calendar events, drive files, shared items",
+                    "github": "repos, PRs, issues, commits, branches, contributors, code reviews",
+                    "shopify": "orders, products, customers, inventory, sales trends, refunds",
+                }
+
                 try:
-                    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+                    client = Anthropic(api_key=settings.anthropic_api_key)
 
                     # Use Haiku for fast, cheap follow-up generation
                     result = client.messages.create(
                         model="claude-3-5-haiku-20241022",
-                        max_tokens=200,
+                        max_tokens=250,
                         messages=[{
                             "role": "user",
-                            "content": f"""Based on this conversation about {datasource}, suggest 3 natural follow-up questions the user might ask next.
+                            "content": f"""Generate 3 insightful follow-up questions based on this {datasource} conversation.
 
-User asked: {query}
+USER'S QUESTION: {query}
 
-Response summary: {response[:500]}...
+RESPONSE GIVEN: {response[:800]}
 
-Rules:
-- Questions should be specific to what was discussed, not generic
-- Questions should help the user explore the data further
-- Keep questions concise (under 10 words each)
-- Return ONLY the 3 questions, one per line, no numbering or bullets"""
+CONTEXT: This is a {datasource} data source. Relevant concepts: {datasource_hints.get(datasource, 'data records, details, related items')}
+
+Generate questions that:
+1. DIG DEEPER - Ask about specific details, people, or items mentioned in the response
+2. COMPARE/CONTRAST - Explore patterns, changes over time, or comparisons
+3. TAKE ACTION - Suggest logical next steps based on what was found
+
+RULES:
+- Be SPECIFIC - reference actual names, dates, or items from the response when possible
+- Be ACTIONABLE - questions should lead to useful insights
+- Be NATURAL - phrase like a real person would ask
+- Keep under 12 words each
+- NO generic questions like "Tell me more" or "Show details"
+
+Return ONLY 3 questions, one per line, no bullets or numbers."""
                         }]
                     )
 
                     # Parse the response into a list
                     questions = [q.strip() for q in result.content[0].text.strip().split('\n') if q.strip()]
+                    # Filter out any that are too generic or too short
+                    questions = [q for q in questions if len(q) > 10 and not q.lower().startswith(('tell me', 'show me more', 'what else'))]
                     return questions[:3]
 
                 except Exception as e:
                     # Fallback to static questions if AI fails
                     logger.warning(f"Failed to generate follow-ups: {e}")
                     fallback = {
-                        "mysql": ["Show related records", "What are the column types?", "Any null values?"],
-                        "s3": ["List other objects", "Show file metadata", "Download this file"],
-                        "jira": ["Show related issues", "Who else is involved?", "What's the history?"],
-                        "google_workspace": ["Show recent changes", "Who has access?", "Search similar"],
+                        "mysql": ["What are the top 10 by count?", "Show trends over the last week", "Which records were updated recently?"],
+                        "s3": ["What's the largest file?", "Show files modified this week", "List files by type"],
+                        "jira": ["Which issues are blocked?", "What's assigned to me?", "Show overdue items"],
+                        "google_workspace": ["Who edited this recently?", "Show my upcoming meetings", "Find related documents"],
+                        "slack": ["What did they say about this?", "Show recent activity in that channel", "Any threads I should check?"],
+                        "github": ["Show recent commits", "Any open PRs to review?", "What issues need attention?"],
+                        "shopify": ["Show today's orders", "What products are low stock?", "Top selling items this week?"],
                     }
-                    return fallback.get(datasource, ["Tell me more", "Show details", "What else?"])
+                    return fallback.get(datasource, ["What patterns do you see?", "Show me the breakdown", "Compare with last week"])
 
             try:
                 # Send session ID first
@@ -177,11 +206,31 @@ Rules:
                     if isinstance(chunk, dict):
                         # Structured event from backend
                         event_type = chunk.get("type")
-                        if event_type == "thinking":
+                        if event_type == "thinking_start":
                             step_counter += 1
+                            # Signal start of extended thinking
+                            yield make_sse({
+                                "type": "thinking_start"
+                            })
                             yield make_sse(make_step(
                                 f"step-{step_counter}", "thinking", "Thinking", "active",
-                                chunk.get("content", "")
+                                "Processing your request..."
+                            ))
+                        elif event_type == "thinking":
+                            thinking_content = chunk.get("content", "")
+                            # Stream actual thinking content from Claude
+                            yield make_sse({
+                                "type": "thinking",
+                                "content": thinking_content
+                            })
+                        elif event_type == "thinking_end":
+                            # Signal end of thinking
+                            yield make_sse({
+                                "type": "thinking_end"
+                            })
+                            # Complete the thinking step
+                            yield make_sse(make_step(
+                                f"step-{step_counter}", "thinking", "Thinking complete", "complete"
                             ))
                         elif event_type == "tool_start":
                             step_counter += 1
