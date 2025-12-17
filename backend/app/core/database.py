@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from typing import AsyncGenerator
@@ -10,9 +11,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Create async engine for MySQL (App internal database - local)
+# Create async engine for MySQL (App internal database)
+# URL-encode the password to handle special characters
+encoded_password = quote_plus(settings.local_mysql_password)
 DATABASE_URL = (
-    f"mysql+aiomysql://{settings.local_mysql_user}:{settings.local_mysql_password}"
+    f"mysql+aiomysql://{settings.local_mysql_user}:{encoded_password}"
     f"@{settings.local_mysql_host}:{settings.local_mysql_port}/{settings.local_mysql_database}"
 )
 
