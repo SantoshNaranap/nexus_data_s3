@@ -31,6 +31,7 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
   const [isActivelyThinking, setIsActivelyThinking] = useState(false)
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   // Witty rotating messages during loading
   const connectingMessage = useWittyMessages(isStreaming && !thinkingContent && !streamingMessage, 'connecting', 2000)
@@ -60,13 +61,33 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
 
   // Load or create session from localStorage when datasource changes
   useEffect(() => {
+    // Abort any ongoing stream when switching datasources
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+      console.log(`[ChatInterface] Aborted ongoing stream for previous datasource`)
+    }
+
+    // Reset all state for clean slate
     setMessages([])
     setStreamingMessage('')
     setAgentSteps([])
+    setIsStreaming(false)
+    setThinkingContent('')
+    setIsActivelyThinking(false)
+    setCurrentThought(undefined)
+
     // Load existing session from localStorage or create new one
     const persistedSessionId = SessionManager.getSessionId(datasource.id)
     setSessionId(persistedSessionId)
     console.log(`[ChatInterface] Loaded session for ${datasource.id}:`, persistedSessionId)
+
+    // Cleanup function to abort when component unmounts
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
   }, [datasource.id])
 
   // Helper to add or update an agent step
@@ -113,6 +134,10 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
     e.preventDefault()
 
     if (!input.trim() || isStreaming) return
+
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController()
+    const abortSignal = abortControllerRef.current.signal
 
     const userMessage: ChatMessage = {
       role: 'user',
@@ -284,7 +309,8 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
               setIsStreaming(false)
               setCurrentThought(undefined)
             },
-          }
+          },
+          abortSignal
         )
       } else {
         // Single-source query - use regular chat API
@@ -468,10 +494,17 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
           // onThinkingEnd - Claude finished thinking
           () => {
             setIsActivelyThinking(false)
-          }
+          },
+          // abortSignal - to cancel request when switching connectors
+          abortSignal
         )
       }
     } catch (error) {
+      // Ignore abort errors - they're expected when switching connectors
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log('[ChatInterface] Request aborted')
+        return
+      }
       setAgentSteps(prev => [...prev, {
         id: `step-${++stepCounter.current}`,
         type: 'error',

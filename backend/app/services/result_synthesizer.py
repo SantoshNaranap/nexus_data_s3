@@ -57,16 +57,26 @@ Your task is to:
 
 Guidelines:
 - Present information in a logical, organized manner
-- Use tables, lists, and formatting for clarity
+- Use tables, lists, and markdown formatting for clarity
 - Highlight key insights that come from combining sources
 - Be explicit about which source each piece of information comes from
 - If sources conflict, explain the discrepancy
 - Provide actionable insights when possible
 - Keep the response focused and relevant to the original query
 
+CRITICAL FORMATTING RULES - MANDATORY:
+- ABSOLUTELY NO EMOJIS - Never use emoji characters like 🚀📊🔴🟡🟢🎯📋💡 etc.
+- This is a strict requirement - zero tolerance for emojis
+- Use plain text headers: ## Main Header, ### Subheader
+- Use bullet points (-) and numbered lists (1. 2. 3.)
+- Use markdown tables for data presentation
+- Use **bold** and *italic* for emphasis - never emoji icons
+- Format like a professional business report - clean and minimal
+
 Response Format:
 - Start with a brief summary answering the user's question
 - Then provide details organized by topic or source
+- Use tables for issue lists, metrics, or comparisons
 - End with key insights or recommendations if appropriate"""
 
     def _truncate_result(self, result: str, max_chars: int) -> str:
@@ -110,7 +120,7 @@ Response Format:
             
             if result.success:
                 # Format successful result
-                status = "✅ SUCCESS"
+                status = "SUCCESS"
                 
                 # Get the data content
                 data_content = ""
@@ -137,7 +147,7 @@ Response Format:
                 )
             else:
                 # Format failed result
-                status = "❌ FAILED"
+                status = "FAILED"
                 error = f"\nError: {result.error}" if result.error else ""
                 
                 formatted_parts.append(f"{header}\n{status}{error}")
@@ -351,11 +361,11 @@ Synthesize a comprehensive response to the user's query."""
         
         if successful:
             sources = [r.datasource for r in successful]
-            parts.append(f"✅ Retrieved data from: {', '.join(sources)}")
-        
+            parts.append(f"Retrieved data from: {', '.join(sources)}")
+
         if failed:
             sources = [r.datasource for r in failed]
-            parts.append(f"⚠️ Failed to query: {', '.join(sources)}")
+            parts.append(f"Failed to query: {', '.join(sources)}")
         
         return " | ".join(parts)
 

@@ -196,6 +196,28 @@ class AuthService:
         user = await AuthService.get_user_by_email(db, email)
         return user is not None
 
+    @staticmethod
+    async def update_last_login(db: AsyncSession, user: User) -> None:
+        """
+        Update user's login timestamps for "What You Missed" feature.
+
+        Moves current last_login to previous_login, then sets new last_login.
+        This allows querying for "since last login" by using previous_login.
+
+        Args:
+            db: Database session
+            user: User object to update
+        """
+        # Preserve the current last_login as previous_login
+        user.previous_login = user.last_login
+        # Set new last_login to now
+        user.last_login = datetime.utcnow()
+
+        await db.commit()
+        await db.refresh(user)
+
+        logger.info(f"Updated login timestamps for user: {user.email}")
+
 
 # Export singleton instance
 auth_service = AuthService()

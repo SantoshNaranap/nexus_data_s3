@@ -15,7 +15,7 @@ from app.core.cache import init_cache_service, get_cache_service
 from app.core.metrics import get_metrics, MetricsMiddleware
 from app.core.exceptions import AppError
 from app.middleware.rate_limit import RateLimitMiddleware, RateLimitConfig
-from app.api import chat, datasources, credentials, auth, agent, health
+from app.api import chat, datasources, credentials, auth, agent, health, digest
 from app.services.mcp_service import mcp_service
 
 # Configure structured logging
@@ -157,6 +157,7 @@ app.include_router(chat.router)
 app.include_router(datasources.router)
 app.include_router(credentials.router)
 app.include_router(agent.router)  # Multi-source agent orchestration
+app.include_router(digest.router)  # "What You Missed" digest feature
 
 
 # ============ Root Endpoint ============

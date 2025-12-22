@@ -61,7 +61,8 @@ export const chatApi = {
     onSource?: (source: SourceReference) => void,
     onThinking?: (content: string) => void,
     onThinkingStart?: () => void,
-    onThinkingEnd?: () => void
+    onThinkingEnd?: () => void,
+    abortSignal?: AbortSignal
   ): Promise<void> => {
     const response = await fetch(`${API_BASE_URL}/api/chat/message/stream`, {
       method: 'POST',
@@ -70,6 +71,7 @@ export const chatApi = {
       },
       credentials: 'include',
       body: JSON.stringify(request),
+      signal: abortSignal,
     });
 
     if (!response.ok) {
@@ -205,6 +207,58 @@ export const authApi = {
 
   logout: async (): Promise<void> => {
     await api.post('/api/auth/logout');
+  },
+};
+
+// Digest API types
+export interface DigestRequest {
+  since?: string;  // ISO timestamp
+  sources?: string[];
+}
+
+export interface SourceResult {
+  datasource: string;
+  success: boolean;
+  data?: { response?: string };
+  summary?: string;
+  error?: string;
+  tools_called?: string[];
+  execution_time_ms?: number;
+  timestamp?: string;
+}
+
+export interface DigestResponse {
+  since: string | null;
+  results: SourceResult[];
+  summary: string;
+  successful_sources: string[];
+  failed_sources: string[];
+  total_time_ms: number;
+}
+
+export interface LastLoginInfo {
+  last_login: string | null;
+  previous_login: string | null;
+  has_previous_login: boolean;
+}
+
+export const digestApi = {
+  getDigest: async (request?: DigestRequest): Promise<DigestResponse> => {
+    // Digest queries multiple sources and calls Claude for each, so needs longer timeout
+    const response = await api.post<DigestResponse>('/api/digest/what-you-missed', request || {}, {
+      timeout: 120000, // 2 minute timeout for digest
+    });
+    return response.data;
+  },
+
+  getSources: async (): Promise<string[]> => {
+    const response = await api.get<{ sources: string[] }>('/api/digest/sources');
+    return response.data.sources;
+  },
+
+  getLastLogin: async (): Promise<LastLoginInfo> => {
+    const response = await api.get<LastLoginInfo>('/api/digest/last-login');
+    return response.data;
   },
 };
 

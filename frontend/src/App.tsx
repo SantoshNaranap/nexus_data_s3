@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { datasourceApi, credentialsApi } from './services/api'
-import DataSourceSidebar from './components/DataSourceSidebar'
+import DataSourceSidebar, { DIGEST_DATASOURCE } from './components/DataSourceSidebar'
 import ChatInterface from './components/ChatInterface'
+import WhatYouMissedDashboard from './components/WhatYouMissedDashboard'
 import SettingsPanel from './components/SettingsPanel'
 import UserMenu from './components/UserMenu'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -48,10 +49,21 @@ function AppContent() {
 
       setConfiguredDatasources(configured)
       console.log('[App] Configured datasources:', Array.from(configured))
+
+      // Auto-select "What You Missed" on app load if user has configured sources
+      // Only auto-select if no datasource is currently selected
+      if (configured.size >= 1 && !selectedDatasource) {
+        const hasSeenDigest = sessionStorage.getItem('hasSeenDigest')
+        if (!hasSeenDigest) {
+          setSelectedDatasource(DIGEST_DATASOURCE)
+          sessionStorage.setItem('hasSeenDigest', 'true')
+          console.log('[App] Auto-selected What You Missed dashboard')
+        }
+      }
     }
 
     checkExistingCredentials()
-  }, [datasources, isAuthenticated])
+  }, [datasources, isAuthenticated, selectedDatasource])
 
   const handleSelectDatasource = (datasource: DataSource) => {
     setSelectedDatasource(datasource)
@@ -149,7 +161,9 @@ function AppContent() {
           </div>
         </header>
 
-        {selectedDatasource ? (
+        {selectedDatasource?.id === 'what_you_missed' ? (
+          <WhatYouMissedDashboard />
+        ) : selectedDatasource ? (
           <ChatInterface datasource={selectedDatasource} />
         ) : (
           <div className="flex-1 flex items-center justify-center p-8 bg-gray-50 dark:bg-gray-900 transition-colors duration-200">

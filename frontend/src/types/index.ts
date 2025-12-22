@@ -46,6 +46,25 @@ export interface User {
   name: string;
   profilePicture?: string;
   createdAt: string;
+  lastLogin?: string;
+  previousLogin?: string;
+}
+
+export interface DigestResult {
+  datasource: string;
+  success: boolean;
+  summary?: string;
+  error?: string;
+  execution_time_ms?: number;
+}
+
+export interface DigestResponse {
+  since: string | null;
+  results: DigestResult[];
+  summary: string;
+  successful_sources: string[];
+  failed_sources: string[];
+  total_time_ms: number;
 }
 
 export interface AgentStep {

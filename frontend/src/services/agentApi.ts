@@ -158,7 +158,8 @@ export const agentApi = {
       onDone?: (result: { successful_sources: string[]; failed_sources: string[]; total_time_ms: number }) => void;
       onError?: (error: string) => void;
       onEvent?: (event: AgentStreamEvent) => void; // Raw event handler
-    }
+    },
+    abortSignal?: AbortSignal
   ): Promise<void> => {
     const response = await fetch(`${API_BASE_URL}/api/agent/query/stream`, {
       method: 'POST',
@@ -167,6 +168,7 @@ export const agentApi = {
       },
       credentials: 'include',
       body: JSON.stringify(request),
+      signal: abortSignal,
     });
 
     if (!response.ok) {

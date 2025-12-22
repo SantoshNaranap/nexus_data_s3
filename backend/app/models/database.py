@@ -21,6 +21,9 @@ class User(Base):
     profile_picture = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    # Login tracking for "What You Missed" feature
+    last_login = Column(DateTime, nullable=True)  # Current login timestamp
+    previous_login = Column(DateTime, nullable=True)  # Previous login (for "since last login" queries)
 
     def to_dict(self):
         """Convert user to dictionary."""
@@ -31,6 +34,8 @@ class User(Base):
             "profile_picture": self.profile_picture,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_login": self.last_login.isoformat() if self.last_login else None,
+            "previous_login": self.previous_login.isoformat() if self.previous_login else None,
         }
 
 

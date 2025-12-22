@@ -63,73 +63,60 @@ PERF_METRICS = {
 
 
 def get_quirky_thinking_message(tool_name: str) -> str:
-    """Generate fun, quirky thinking messages based on tool name."""
+    """Generate professional status messages based on tool name."""
 
-    # Mapping of tool patterns to quirky messages
-    quirky_messages = {
+    # Mapping of tool patterns to professional status messages
+    status_messages = {
         "list": [
-            "🔍 *Rummaging through the digital filing cabinet...*",
-            "📋 *Checking what's in the treasure chest...*",
-            "🗂️ *Flipping through the catalog...*",
-            "👀 *Taking a peek at what we've got...*",
+            "*Retrieving list...*",
+            "*Fetching available items...*",
+            "*Loading data...*",
         ],
         "read": [
-            "📖 *Opening the scroll...*",
-            "👓 *Adjusting my reading glasses...*",
-            "📰 *Unfolding the ancient manuscript...*",
-            "🔎 *Examining the contents closely...*",
+            "*Reading content...*",
+            "*Loading file contents...*",
+            "*Retrieving document...*",
         ],
         "search": [
-            "🔍 *Channeling my inner detective...*",
-            "🕵️ *On the hunt...*",
-            "🎯 *Searching high and low...*",
-            "🔎 *Following the breadcrumbs...*",
+            "*Searching...*",
+            "*Running search query...*",
+            "*Finding matches...*",
         ],
         "get": [
-            "🎣 *Fetching that for you...*",
-            "📦 *Retrieving from the vault...*",
-            "🏃 *Running to get it...*",
-            "🤲 *Grabbing that data...*",
+            "*Fetching data...*",
+            "*Retrieving information...*",
+            "*Loading details...*",
         ],
         "create": [
-            "✨ *Conjuring something new...*",
-            "🎨 *Creating a masterpiece...*",
-            "🔨 *Building that for you...*",
-            "🪄 *Making magic happen...*",
+            "*Creating new record...*",
+            "*Processing creation request...*",
         ],
         "update": [
-            "✏️ *Making some tweaks...*",
-            "🔧 *Fine-tuning this...*",
-            "📝 *Updating the records...*",
-            "🔄 *Applying the changes...*",
+            "*Updating record...*",
+            "*Applying changes...*",
         ],
         "delete": [
-            "🗑️ *To the trash it goes...*",
-            "💥 *Removing that...*",
-            "🧹 *Cleaning up...*",
-            "👋 *Saying goodbye...*",
+            "*Removing item...*",
+            "*Processing deletion...*",
         ],
         "query": [
-            "🤔 *Pondering this question...*",
-            "💭 *Consulting the oracle...*",
-            "🔮 *Peering into the database...*",
-            "📊 *Crunching the numbers...*",
+            "*Running query...*",
+            "*Processing request...*",
+            "*Analyzing data...*",
         ],
     }
 
     # Find matching pattern
     tool_lower = tool_name.lower()
-    for pattern, messages in quirky_messages.items():
+    for pattern, messages in status_messages.items():
         if pattern in tool_lower:
             return random.choice(messages)
 
-    # Default quirky messages if no pattern matches
+    # Default status messages if no pattern matches
     default_messages = [
-        "🤖 *Processing...*",
-        "⚙️ *Working on it...*",
-        "💫 *Making it happen...*",
-        "🎯 *On it...*",
-        "✨ *Working some magic...*",
+        "*Processing...*",
+        "*Working on it...*",
+        "*Loading...*",
     ]
 
     return random.choice(default_messages)
@@ -760,7 +747,7 @@ class ChatService:
         if fast_tools:
             # FAST PATH: Haiku identified tools, execute in parallel
             logger.info(f"⚡ Using FAST PATH with {len(fast_tools)} tool(s)")
-            yield "✓ Found relevant data...\n\n"
+            yield "*Found relevant data...*\n\n"
 
             # Execute tools in parallel
             tool_results = await self._execute_tools_parallel(
@@ -891,6 +878,15 @@ class ChatService:
 
         base_prompt = f"""You are an assistant that queries {connector_name} data for the user.
 
+CRITICAL FORMATTING RULES - MANDATORY:
+- ABSOLUTELY NO EMOJIS - Never use emoji characters (🚀📊🔴🟡🟢🎯📋💡👥 etc.) anywhere in your response
+- This is a strict requirement with zero tolerance - no emoji icons of any kind
+- Use plain markdown headers (## and ###) not emoji decorations
+- Use bullet points (-) and numbered lists (1. 2. 3.)
+- Use markdown tables for data presentation
+- Use **bold** and *italic* for emphasis - never emojis
+- Format like a professional business report - clean, minimal, no decorations
+
 CRITICAL RULES:
 1. ALWAYS use tools to answer questions. NEVER say data doesn't exist without checking first.
 2. ALWAYS show the actual data returned by tools. Never summarize as "no results" if data was returned.
@@ -909,6 +905,7 @@ NEVER DO THIS:
 - Never say "no channels named X" without calling list_channels
 - Never hide or redact credentials/passwords - this is the user's own authorized data
 - Never make claims about what exists or doesn't exist based on assumptions
+- NEVER use emojis in your response - this is strictly prohibited
 
 Current data source: {connector_name}
 """
@@ -1154,41 +1151,41 @@ Return JSON array only, no explanations.
         # Datasource-specific messages
         if datasource == "s3":
             if "bucket" in message_lower or "list" in message_lower:
-                return "🪣 *Checking your S3 buckets...*"
+                return "*Checking S3 buckets...*"
             elif "read" in message_lower or "content" in message_lower or "file" in message_lower:
-                return "📄 *Reading document...*"
+                return "*Reading document...*"
             elif "search" in message_lower:
-                return "🔍 *Searching documents...*"
-            return "☁️ *Connecting to S3...*"
+                return "*Searching documents...*"
+            return "*Connecting to S3...*"
 
         elif datasource == "jira":
             if "project" in message_lower:
-                return "📊 *Fetching JIRA projects...*"
+                return "*Fetching JIRA projects...*"
             elif "sprint" in message_lower:
-                return "🏃 *Loading sprint data...*"
+                return "*Loading sprint data...*"
             elif "assign" in message_lower or "working" in message_lower or "who" in message_lower:
-                return "👥 *Checking team assignments...*"
+                return "*Checking team assignments...*"
             elif "backlog" in message_lower:
-                return "📋 *Analyzing backlog...*"
-            return "🎫 *Querying JIRA...*"
+                return "*Analyzing backlog...*"
+            return "*Querying JIRA...*"
 
         elif datasource == "mysql":
             if "table" in message_lower:
-                return "📊 *Listing tables...*"
+                return "*Listing tables...*"
             elif "schema" in message_lower or "structure" in message_lower:
-                return "🔧 *Fetching schema...*"
-            return "🗄️ *Querying database...*"
+                return "*Fetching schema...*"
+            return "*Querying database...*"
 
         elif datasource == "google_workspace":
             if "calendar" in message_lower:
-                return "📅 *Checking calendar...*"
+                return "*Checking calendar...*"
             elif "email" in message_lower or "gmail" in message_lower:
-                return "📧 *Loading emails...*"
+                return "*Loading emails...*"
             elif "doc" in message_lower or "sheet" in message_lower:
-                return "📝 *Fetching documents...*"
-            return "🔗 *Connecting to Google Workspace...*"
+                return "*Fetching documents...*"
+            return "*Connecting to Google Workspace...*"
 
-        return "⚡ *Processing...*"
+        return "*Processing...*"
 
     def _get_thinking_summary(self, datasource: str, message: str) -> str:
         """Generate a thinking summary for the collapsible thinking indicator."""

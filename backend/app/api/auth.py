@@ -132,6 +132,9 @@ async def login(
             detail="Invalid email or password",
         )
 
+    # Update login timestamps for "What You Missed" feature
+    await auth_service.update_last_login(db, user)
+
     # Create JWT access token
     access_token = auth_service.create_access_token(
         data={"user_id": user.id, "email": user.email}
@@ -158,6 +161,8 @@ async def login(
             "email": user.email,
             "name": user.name,
             "profile_picture": user.profile_picture,
+            "last_login": user.last_login.isoformat() if user.last_login else None,
+            "previous_login": user.previous_login.isoformat() if user.previous_login else None,
         },
     )
 
@@ -177,6 +182,8 @@ async def get_current_user_info(
         "name": current_user.name,
         "profile_picture": current_user.profile_picture,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
+        "previous_login": current_user.previous_login.isoformat() if current_user.previous_login else None,
     }
 
 
