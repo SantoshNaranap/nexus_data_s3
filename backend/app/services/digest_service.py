@@ -189,9 +189,16 @@ class DigestService:
             for source in sources
         }
 
-        # Execute queries in parallel
+        # Execute queries with limited concurrency (max 2 at a time to avoid overwhelming system)
+        MAX_CONCURRENT_SOURCES = 2
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_SOURCES)
+
+        async def query_with_semaphore(source: str, query: str):
+            async with semaphore:
+                return await self._query_single_source(source, query, user_id, db)
+
         tasks = [
-            self._query_single_source(source, query, user_id, db)
+            query_with_semaphore(source, query)
             for source, query in source_queries.items()
         ]
 

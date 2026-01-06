@@ -15,6 +15,7 @@ from mcp.client.stdio import stdio_client
 
 from app.core.config import settings
 from app.services.credential_service import credential_service
+from app.services.circuit_breaker import get_mcp_breaker, CircuitOpenError
 from app.connectors import (
     get_connector,
     get_all_connectors,
@@ -29,15 +30,21 @@ logger = logging.getLogger(__name__)
 # Cache for tools to avoid repeated list_tools calls
 TOOLS_CACHE: Dict[str, Dict[str, Any]] = {}  # {datasource: {"tools": [...], "timestamp": float}}
 TOOLS_CACHE_TTL = 300  # 5 minutes TTL for tool cache
+TOOLS_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to tools cache
 
 # Result cache for repeated queries (short TTL for freshness)
 RESULT_CACHE: Dict[str, Dict[str, Any]] = {}  # {cache_key: {"result": [...], "timestamp": float}}
 RESULT_CACHE_TTL = 30  # 30 seconds - short TTL for fresh data
 RESULT_CACHE_MAX_SIZE = 100  # Max cached results
+RESULT_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to result cache
 
 # Schema cache for MySQL tables (longer TTL - schemas don't change often)
 SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}  # {table_name: {"columns": [...], "timestamp": float}}
 SCHEMA_CACHE_TTL = 600  # 10 minutes TTL for schema cache
+SCHEMA_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to schema cache
+
+# Connection idle timeout for persistent sessions
+CONNECTION_IDLE_TIMEOUT = 300  # 5 minutes - close idle connections to free resources
 
 
 class MCPService:
@@ -84,19 +91,20 @@ class MCPService:
 
     async def get_cached_tools(self, datasource: str) -> List[dict]:
         """
-        Get tools for a datasource with caching.
+        Get tools for a datasource with caching (thread-safe).
         This significantly reduces latency for repeated tool lookups.
         """
         now = time.time()
 
-        # Check cache
-        if datasource in TOOLS_CACHE:
-            cached = TOOLS_CACHE[datasource]
-            if now - cached["timestamp"] < TOOLS_CACHE_TTL:
-                logger.info(f"⚡ Using cached tools for {datasource} (age: {now - cached['timestamp']:.0f}s)")
-                return cached["tools"]
+        # Check cache first (with lock for thread-safety)
+        async with TOOLS_CACHE_LOCK:
+            if datasource in TOOLS_CACHE:
+                cached = TOOLS_CACHE[datasource]
+                if now - cached["timestamp"] < TOOLS_CACHE_TTL:
+                    logger.info(f"Using cached tools for {datasource} (age: {now - cached['timestamp']:.0f}s)")
+                    return cached["tools"]
 
-        # Cache miss - fetch tools
+        # Cache miss - fetch tools (outside lock to avoid blocking)
         start = time.time()
         try:
             async with self.get_client(datasource) as session:
@@ -110,14 +118,15 @@ class MCPService:
                     for tool in tools_result.tools
                 ]
 
-                # Update cache
-                TOOLS_CACHE[datasource] = {
-                    "tools": tools,
-                    "timestamp": now,
-                }
+                # Update cache (with lock)
+                async with TOOLS_CACHE_LOCK:
+                    TOOLS_CACHE[datasource] = {
+                        "tools": tools,
+                        "timestamp": now,
+                    }
 
                 elapsed = time.time() - start
-                logger.info(f"⚡ Fetched and cached {len(tools)} tools for {datasource} in {elapsed:.2f}s")
+                logger.info(f"Fetched and cached {len(tools)} tools for {datasource} in {elapsed:.2f}s")
                 return tools
 
         except asyncio.TimeoutError:
@@ -329,17 +338,47 @@ class MCPService:
             db: Optional database session for retrieving user credentials
             force_refresh: If True, bypasses cache and fetches fresh data
         """
+        # Get circuit breaker for this datasource
+        breaker = get_mcp_breaker(datasource)
+
+        # Check if circuit is open before attempting call
+        if not breaker.is_available():
+            stats = breaker.get_stats()
+            raise CircuitOpenError(
+                f"Service {datasource} is temporarily unavailable. "
+                f"Retry in {stats['seconds_until_retry']:.0f}s"
+            )
+
         # Try to use fast path with caching
         try:
-            return await self.call_tool_fast(
+            result = await self.call_tool_fast(
                 datasource, tool_name, arguments, user_id, session_id, db, force_refresh
             )
+            await breaker.record_success()
+            return result
+        except CircuitOpenError:
+            raise  # Don't record circuit errors as failures
         except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+            await breaker.record_failure(e)
             logger.warning(f"Fast path failed for {datasource}, falling back to standard: {e}")
-            # Fallback to standard connection
-            async with self.get_client(datasource, user_id, session_id, db=db) as session:
-                result = await session.call_tool(tool_name, arguments)
-                return result.content if result else []
+
+            # Check if circuit is still available after recording failure
+            if not breaker.is_available():
+                stats = breaker.get_stats()
+                raise CircuitOpenError(
+                    f"Service {datasource} is temporarily unavailable after failure. "
+                    f"Retry in {stats['seconds_until_retry']:.0f}s"
+                )
+
+            # Fallback to standard connection with circuit breaker protection
+            try:
+                async with self.get_client(datasource, user_id, session_id, db=db) as session:
+                    result = await session.call_tool(tool_name, arguments)
+                    await breaker.record_success()
+                    return result.content if result else []
+            except (asyncio.TimeoutError, ConnectionError, OSError) as fallback_error:
+                await breaker.record_failure(fallback_error)
+                raise
 
     def _get_cache_key(self, datasource: str, tool_name: str, arguments: dict) -> str:
         """Generate a cache key for result caching."""
@@ -347,22 +386,23 @@ class MCPService:
         key_str = f"{datasource}:{tool_name}:{args_str}"
         return hashlib.md5(key_str.encode()).hexdigest()
 
-    def _check_result_cache(self, cache_key: str, force_refresh: bool = False) -> Optional[List[Any]]:
-        """Check if we have a cached result."""
-        if force_refresh:
-            # User requested fresh data, skip cache
-            if cache_key in RESULT_CACHE:
-                del RESULT_CACHE[cache_key]
-            return None
+    async def _check_result_cache(self, cache_key: str, force_refresh: bool = False) -> Optional[List[Any]]:
+        """Check if we have a cached result (thread-safe)."""
+        async with RESULT_CACHE_LOCK:
+            if force_refresh:
+                # User requested fresh data, skip cache
+                if cache_key in RESULT_CACHE:
+                    del RESULT_CACHE[cache_key]
+                return None
 
-        if cache_key in RESULT_CACHE:
-            cached = RESULT_CACHE[cache_key]
-            if time.time() - cached["timestamp"] < RESULT_CACHE_TTL:
-                return cached["result"]
-            else:
-                # Expired, remove it
-                del RESULT_CACHE[cache_key]
-        return None
+            if cache_key in RESULT_CACHE:
+                cached = RESULT_CACHE[cache_key]
+                if time.time() - cached["timestamp"] < RESULT_CACHE_TTL:
+                    return cached["result"]
+                else:
+                    # Expired, remove it
+                    del RESULT_CACHE[cache_key]
+            return None
 
     def should_force_refresh(self, message: str) -> bool:
         """
@@ -378,19 +418,20 @@ class MCPService:
         message_lower = message.lower()
         return any(keyword in message_lower for keyword in refresh_keywords)
 
-    def _store_result_cache(self, cache_key: str, result: List[Any]):
-        """Store a result in the cache."""
-        # Prune cache if too large
-        if len(RESULT_CACHE) >= RESULT_CACHE_MAX_SIZE:
-            # Remove oldest entries
-            sorted_keys = sorted(RESULT_CACHE.keys(), key=lambda k: RESULT_CACHE[k]["timestamp"])
-            for key in sorted_keys[:20]:  # Remove 20 oldest
-                del RESULT_CACHE[key]
+    async def _store_result_cache(self, cache_key: str, result: List[Any]):
+        """Store a result in the cache (thread-safe)."""
+        async with RESULT_CACHE_LOCK:
+            # Prune cache if too large
+            if len(RESULT_CACHE) >= RESULT_CACHE_MAX_SIZE:
+                # Remove oldest entries
+                sorted_keys = sorted(RESULT_CACHE.keys(), key=lambda k: RESULT_CACHE[k]["timestamp"])
+                for key in sorted_keys[:20]:  # Remove 20 oldest
+                    del RESULT_CACHE[key]
 
-        RESULT_CACHE[cache_key] = {
-            "result": result,
-            "timestamp": time.time(),
-        }
+            RESULT_CACHE[cache_key] = {
+                "result": result,
+                "timestamp": time.time(),
+            }
 
     async def call_tool_fast(
         self,
@@ -419,13 +460,13 @@ class MCPService:
         cache_key = None
         if tool_name in cacheable_tools:
             cache_key = self._get_cache_key(datasource, tool_name, arguments)
-            cached_result = self._check_result_cache(cache_key, force_refresh=force_refresh)
+            cached_result = await self._check_result_cache(cache_key, force_refresh=force_refresh)
             if cached_result is not None:
                 elapsed = time.time() - start_time
-                logger.info(f"⚡⚡⚡ CACHED result ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
+                logger.info(f"CACHED result ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
                 return cached_result
             elif force_refresh:
-                logger.info(f"🔄 Force refresh requested for {datasource}/{tool_name}")
+                logger.info(f"Force refresh requested for {datasource}/{tool_name}")
 
         # Use standard connection (MCP stdio doesn't support reuse well across tasks)
         async with self.get_client(datasource, user_id, session_id, db=db) as session:
@@ -436,7 +477,7 @@ class MCPService:
 
             # Store in cache for future requests
             if cache_key:
-                self._store_result_cache(cache_key, result_content)
+                await self._store_result_cache(cache_key, result_content)
 
             return result_content
 

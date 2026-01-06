@@ -69,7 +69,23 @@ async def get_what_you_missed(
 
     If no 'since' timestamp is provided, uses the user's previous_login.
     If no previous_login exists, defaults to last 24 hours.
+
+    NOTE: Digest is pre-loaded in background after login for instant display.
     """
+    # Check for cached digest first (pre-loaded on login)
+    from app.api.auth import get_cached_digest
+    cached = get_cached_digest(current_user.id)
+    if cached and not (request and request.since):  # Don't use cache for custom time ranges
+        logger.info(f"Returning cached digest for user {current_user.email}")
+        return DigestResponse(
+            since=cached["since"],
+            results=cached["results"],
+            summary=cached["summary"],
+            successful_sources=cached["successful_sources"],
+            failed_sources=cached["failed_sources"],
+            total_time_ms=cached["total_time_ms"],
+        )
+
     # Determine the 'since' timestamp
     since = None
     if request and request.since:

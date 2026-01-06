@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { datasourceApi, credentialsApi } from './services/api'
-import DataSourceSidebar, { DIGEST_DATASOURCE } from './components/DataSourceSidebar'
+import DataSourceSidebar from './components/DataSourceSidebar'
 import ChatInterface from './components/ChatInterface'
 import WhatYouMissedDashboard from './components/WhatYouMissedDashboard'
 import SettingsPanel from './components/SettingsPanel'
@@ -49,21 +49,11 @@ function AppContent() {
 
       setConfiguredDatasources(configured)
       console.log('[App] Configured datasources:', Array.from(configured))
-
-      // Auto-select "What You Missed" on app load if user has configured sources
-      // Only auto-select if no datasource is currently selected
-      if (configured.size >= 1 && !selectedDatasource) {
-        const hasSeenDigest = sessionStorage.getItem('hasSeenDigest')
-        if (!hasSeenDigest) {
-          setSelectedDatasource(DIGEST_DATASOURCE)
-          sessionStorage.setItem('hasSeenDigest', 'true')
-          console.log('[App] Auto-selected What You Missed dashboard')
-        }
-      }
+      // Note: "What You Missed" is NOT auto-loaded - user clicks it when ready
     }
 
     checkExistingCredentials()
-  }, [datasources, isAuthenticated, selectedDatasource])
+  }, [datasources, isAuthenticated])
 
   const handleSelectDatasource = (datasource: DataSource) => {
     setSelectedDatasource(datasource)

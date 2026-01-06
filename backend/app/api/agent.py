@@ -13,7 +13,7 @@ Endpoints:
 
 import logging
 import json
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, Body
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -247,7 +247,7 @@ async def suggest_sources(
 
 
 @router.post("/detect")
-async def detect_multi_source(query: str):
+async def detect_multi_source(query: str = Body(..., embed=True)):
     """
     Detect if a query should use multi-source processing.
     
@@ -335,6 +335,7 @@ async def get_available_sources():
     """
     from app.services.mcp_service import mcp_service
     return mcp_service.get_available_datasources()
+
 
 
 

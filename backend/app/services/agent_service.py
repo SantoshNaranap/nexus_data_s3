@@ -17,7 +17,7 @@ The agent uses an intelligent planning approach with:
 import logging
 import asyncio
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Any, Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -84,9 +84,6 @@ class AgentOrchestrator:
 
     def __init__(self):
         """Initialize the agent orchestrator."""
-        # Session storage for multi-turn conversations
-        self.sessions: Dict[str, List[dict]] = {}
-        
         # Default configuration
         self.default_confidence_threshold = 0.5
         self.default_max_sources = 3
@@ -725,6 +722,7 @@ class AgentOrchestrator:
 
 # Create global instance for import
 agent_orchestrator = AgentOrchestrator()
+
 
 
 
