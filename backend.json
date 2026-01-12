@@ -14,7 +14,7 @@
                 },
                 {
                     "name": "ENVIRONMENT",
-                    "value": "production"
+                    "value": "development"
                 },
                 {
                     "name": "LOCAL_MYSQL_PASSWORD",
