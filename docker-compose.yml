@@ -31,7 +31,7 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-YObEtwQKn42aYaLctHJUyYKmto1r18LfSMJaur_oKe4=}
       - CORS_ORIGINS=${CORS_ORIGINS}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - API_BASE_URL=${API_BASE_URL:-http://localhost:8001}
+      - API_BASE_URL=${API_BASE_URL:-https://mosaic.apps.kaaylabs.com/api}
     # Production command (no reload)
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
