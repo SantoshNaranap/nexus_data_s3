@@ -49,7 +49,7 @@ services:
       args:
         # Backend API URL (set this to your ECS backend service URL)
         # This is baked into the build at build time
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
+        VITE_API_URL: ${VITE_API_URL:-https://mosaic.apps.kaaylabs.com/api*}
     ports:
       - "8080:80"
     restart: unless-stopped
