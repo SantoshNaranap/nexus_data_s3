@@ -10,15 +10,15 @@
                 },
                 {
                     "name": "LOCAL_MYSQL_USER",
-                    "value": "dev-mosaic"
+                    "value": "mosaic-dev"
                 },
                 {
                     "name": "ENVIRONMENT",
-                    "value": "development"
+                    "value": "production"
                 },
                 {
                     "name": "LOCAL_MYSQL_PASSWORD",
-                    "value": "th2dr!Gim"
+                    "value": "oJ}5l_^+"
                 },
                 {
                     "name": "CORS_ORIGINS",
@@ -34,7 +34,7 @@
                 },
                 {
                     "name": "LOCAL_MYSQL_DATABASE",
-                    "value": "mosaic"
+                    "value": "mosaic-dev"
                 }
             ],
             "essential": true,
