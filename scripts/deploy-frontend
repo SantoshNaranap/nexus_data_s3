@@ -34,7 +34,7 @@ rm -rf ${JSON_FILE}-${BUILD_NUMBER}.json
 rm -rf ${JSON_FILE}-new-${BUILD_NUMBER}.json
 }
 
-if [ "$GIT_BRANCH" = "devops-fix" ]
+if [ "$GIT_BRANCH" = "santosh-dev" ]
 then
 SERVICE_NAME="mosaic-frontend"
 IMAGE_VERSION="${GIT_BRANCH}-${BUILD_NUMBER}"
