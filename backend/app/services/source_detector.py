@@ -118,6 +118,28 @@ class SourceDetector:
                 "negative_keywords": ["s3", "bucket", "jira", "shopify", "order"],
                 "weight": 0.8,
             },
+            "slack": {
+                # Keywords that indicate Slack queries
+                "keywords": [
+                    "slack", "message", "messages", "channel", "channels", "dm",
+                    "dms", "direct message", "conversation", "chat", "team",
+                    "workspace", "thread", "mention", "mentioned", "user", "users",
+                    "sent", "posted", "said", "wrote", "catch up", "missed"
+                ],
+                "negative_keywords": ["jira", "issue", "s3", "bucket", "order", "gmail"],
+                "weight": 0.85,
+            },
+            "github": {
+                # Keywords that indicate GitHub queries
+                "keywords": [
+                    "github", "repo", "repos", "repository", "repositories",
+                    "commit", "commits", "pull request", "pr", "prs", "merge",
+                    "branch", "branches", "code", "issue", "issues", "bug",
+                    "workflow", "action", "actions", "ci", "cd", "release"
+                ],
+                "negative_keywords": ["jira", "shopify", "s3", "slack", "email"],
+                "weight": 0.85,
+            },
         }
 
     def _build_source_metadata(self) -> Dict[str, Dict[str, str]]:
@@ -156,6 +178,18 @@ class SourceDetector:
                 "description": "Productivity suite including Gmail, Drive, Calendar",
                 "best_for": "Emails, documents, calendar events, collaboration",
                 "data_types": "Emails, documents, spreadsheets, calendar events",
+            },
+            "slack": {
+                "name": "Slack",
+                "description": "Team messaging and collaboration platform",
+                "best_for": "Messages, channels, DMs, team communication",
+                "data_types": "Messages, channels, users, threads, files",
+            },
+            "github": {
+                "name": "GitHub",
+                "description": "Code hosting and version control platform",
+                "best_for": "Repositories, issues, pull requests, code, commits",
+                "data_types": "Repos, issues, PRs, commits, branches, workflows",
             },
         }
 
@@ -255,7 +289,25 @@ class SourceDetector:
             elif "calendar" in query_lower or "meeting" in query_lower:
                 return "Use get_events to check calendar"
             return "Use search_drive_files to find documents"
-            
+
+        elif datasource == "slack":
+            if "channel" in query_lower:
+                return "Use list_channels to see available channels"
+            elif "dm" in query_lower or "direct" in query_lower:
+                return "Use read_dm_with_user for DM conversations"
+            elif "search" in query_lower:
+                return "Use search_messages to find specific content"
+            return "Use get_all_recent_messages for recent activity"
+
+        elif datasource == "github":
+            if "repo" in query_lower:
+                return "Use list_repositories to see available repos"
+            elif "issue" in query_lower:
+                return "Use list_issues to see open issues"
+            elif "pr" in query_lower or "pull" in query_lower:
+                return "Use list_pull_requests to see PRs"
+            return "Use list_repositories first, then drill into specific repo"
+
         return "Query this source for relevant information"
 
     async def detect_sources_llm(
@@ -291,10 +343,17 @@ USER QUERY: "{query}"
 AVAILABLE DATA SOURCES:
 {sources_context}
 
+ACCURACY RULES - CRITICAL:
+- Only recommend sources that are EXPLICITLY listed in AVAILABLE DATA SOURCES above
+- Do NOT invent or assume what data a source might contain beyond its description
+- Base confidence scores ONLY on how well the query matches the source description
+- If unsure about relevance, use a lower confidence score (below 0.5)
+- Never fabricate reasoning - base it only on the source descriptions provided
+
 For each relevant source, provide:
-1. datasource: The source ID
+1. datasource: The source ID (must be from the list above)
 2. confidence: A score from 0.0 to 1.0 (higher = more relevant)
-3. reasoning: Why this source is relevant
+3. reasoning: Why this source is relevant (based on its description)
 4. suggested_approach: How to query this source
 
 Respond with a JSON array of relevant sources. Only include sources with confidence >= 0.4.

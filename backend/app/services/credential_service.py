@@ -2,6 +2,7 @@
 
 import logging
 import json
+import asyncio
 from typing import Dict, Optional
 from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
@@ -30,6 +31,8 @@ class CredentialService:
         self._session_timestamps: Dict[str, datetime] = {}
         # Session timeout (24 hours)
         self._session_timeout = timedelta(hours=24)
+        # Lock for thread-safe access to in-memory credentials
+        self._lock = asyncio.Lock()
 
         # Encryption key from settings (guaranteed to be valid by config validator)
         encryption_key = settings.encryption_key
@@ -102,13 +105,14 @@ class CredentialService:
                 raise
         elif session_id:
             # Anonymous user - use in-memory storage (backward compatibility)
-            self._cleanup_expired_sessions()
+            async with self._lock:
+                await self._cleanup_expired_sessions_locked()
 
-            if session_id not in self._credentials:
-                self._credentials[session_id] = {}
+                if session_id not in self._credentials:
+                    self._credentials[session_id] = {}
 
-            self._credentials[session_id][datasource] = credentials
-            self._session_timestamps[session_id] = datetime.now()
+                self._credentials[session_id][datasource] = credentials
+                self._session_timestamps[session_id] = datetime.now()
 
             logger.info(f"Saved credentials for {datasource} in session {session_id[:8]}...")
         else:
@@ -154,17 +158,18 @@ class CredentialService:
                 raise
         elif session_id:
             # Anonymous user - get from in-memory storage
-            self._cleanup_expired_sessions()
+            async with self._lock:
+                await self._cleanup_expired_sessions_locked()
 
-            if session_id not in self._credentials:
-                return None
+                if session_id not in self._credentials:
+                    return None
 
-            credentials = self._credentials[session_id].get(datasource)
+                credentials = self._credentials[session_id].get(datasource)
 
-            if credentials:
-                self._session_timestamps[session_id] = datetime.now()
+                if credentials:
+                    self._session_timestamps[session_id] = datetime.now()
 
-            return credentials
+                return credentials
         else:
             return None
 
@@ -256,7 +261,7 @@ class CredentialService:
         logger.info(f"Deleted session {session_id[:8]}...")
 
     def _cleanup_expired_sessions(self) -> None:
-        """Clean up expired sessions."""
+        """Clean up expired sessions (non-locked version for backward compatibility)."""
         now = datetime.now()
         expired_sessions = [
             session_id
@@ -266,6 +271,20 @@ class CredentialService:
 
         for session_id in expired_sessions:
             self.delete_session(session_id)
+            logger.info(f"Cleaned up expired session {session_id[:8]}...")
+
+    async def _cleanup_expired_sessions_locked(self) -> None:
+        """Clean up expired sessions (must be called with lock held)."""
+        now = datetime.now()
+        expired_sessions = [
+            session_id
+            for session_id, timestamp in self._session_timestamps.items()
+            if now - timestamp > self._session_timeout
+        ]
+
+        for session_id in expired_sessions:
+            self._credentials.pop(session_id, None)
+            self._session_timestamps.pop(session_id, None)
             logger.info(f"Cleaned up expired session {session_id[:8]}...")
 
 

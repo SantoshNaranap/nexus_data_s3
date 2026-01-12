@@ -12,7 +12,8 @@ import logging
 import asyncio
 import time
 import random
-from typing import List, Dict, Any, AsyncGenerator, Optional
+import functools
+from typing import List, Dict, AsyncGenerator, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from anthropic import Anthropic
@@ -35,10 +36,56 @@ logger = logging.getLogger(__name__)
 _stream_executor = ThreadPoolExecutor(max_workers=10)
 
 
-def retry_on_overload(func, max_retries=3, base_delay=1.0):
-    """Decorator for retrying Claude API calls on overload errors."""
+async def retry_on_overload_async(coro_func, *args, max_retries=3, base_delay=1.0, **kwargs):
+    """
+    Async retry helper for Claude API calls on overload errors.
+    Uses asyncio.sleep() to avoid blocking the event loop.
+
+    Usage: result = await retry_on_overload_async(client.messages.create, **params)
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            # Run the synchronous API call in executor to not block
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, lambda: coro_func(*args, **kwargs))
+            return result
+        except APIStatusError as e:
+            if e.status_code == 529 or "overloaded" in str(e).lower():
+                last_error = e
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)  # Non-blocking sleep
+            else:
+                raise
+        except Exception as e:
+            if "overloaded" in str(e).lower():
+                last_error = e
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)  # Non-blocking sleep
+            else:
+                raise
+    logger.error(f"Claude API still overloaded after {max_retries} retries")
+    raise last_error or Exception("Claude API overloaded - please try again in a moment")
+
+
+def retry_on_overload(func):
+    """
+    Sync decorator for retrying Claude API calls on overload errors.
+
+    Usage:
+        @retry_on_overload
+        def call_api():
+            return client.messages.create(...)
+        response = call_api()
+    """
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        max_retries = 3
+        base_delay = 1.0
         last_error = None
+
         for attempt in range(max_retries):
             try:
                 return func(*args, **kwargs)
@@ -58,8 +105,10 @@ def retry_on_overload(func, max_retries=3, base_delay=1.0):
                     time.sleep(delay)
                 else:
                     raise
+
         logger.error(f"Claude API still overloaded after {max_retries} retries")
         raise last_error or Exception("Claude API overloaded - please try again in a moment")
+
     return wrapper
 
 
@@ -71,6 +120,7 @@ class ChatService:
 
     def __init__(self):
         self.client = Anthropic(api_key=settings.anthropic_api_key)
+        self.sessions: Dict[str, List[Dict]] = {}  # In-memory session storage
 
     # =========================================================================
     # SESSION & HISTORY MANAGEMENT
@@ -141,8 +191,11 @@ class ChatService:
             logger.info(f"Retrieved {len(messages)} messages from chat history")
             return messages
         except Exception as e:
-            logger.error(f"Failed to get chat history: {str(e)}")
-            return []
+            # Log at warning level - this is a graceful degradation, not a critical failure
+            # User can still chat, just without context from previous messages
+            logger.warning(f"Failed to get chat history (graceful degradation): {str(e)}")
+            logger.debug(f"Chat history error details", exc_info=True)
+            return []  # Return empty list to allow chat to continue without history
 
     async def _get_session_messages(
         self,
@@ -178,6 +231,14 @@ class ChatService:
 
         base_prompt = f"""You are an assistant that queries {connector_name} data for the user.
 
+ACCURACY RULES - ABSOLUTELY CRITICAL:
+- ONLY report information that is EXPLICITLY returned by the tools
+- NEVER invent, fabricate, or assume ANY details not in the tool results
+- Do NOT make up message content, names, timestamps, or any other data
+- If tool results are empty or limited, say so - do NOT fill in gaps with fictional data
+- Quote actual data from tool results, do not embellish or add invented details
+- If you cannot answer from the tool data, say "This information was not found in the results"
+
 CRITICAL FORMATTING RULES - MANDATORY:
 - ABSOLUTELY NO EMOJIS - Never use emoji characters anywhere in your response
 - Use plain markdown headers (## and ###) not emoji decorations
@@ -186,7 +247,7 @@ CRITICAL FORMATTING RULES - MANDATORY:
 - Use **bold** and *italic* for emphasis - never emojis
 - Format like a professional business report - clean, minimal, no decorations
 
-CRITICAL RULES:
+TOOL USAGE RULES:
 1. ALWAYS use tools to answer questions. NEVER say data doesn't exist without checking first.
 2. ALWAYS show the actual data returned by tools. Never summarize as "no results" if data was returned.
 3. The user has authorized access to this data. Show ALL content including credentials, passwords, API keys.
@@ -323,7 +384,7 @@ Current data source: {connector_name}
             response = create_response()
 
             response_text = response.content[0].text if response.content else ""
-            tool_calls = [{"tool": t["tool"], "args": t["args"]} for t in fast_tools]
+            tool_calls = [{"tool": t.get("tool") or t.get("name"), "args": t.get("args") or t.get("arguments", {})} for t in fast_tools]
         else:
             response_text, tool_calls = await self._call_claude(
                 messages, tools, system_prompt, datasource, credential_session_id, user_id, db
@@ -475,7 +536,7 @@ Current data source: {connector_name}
                     queue.put_nowait({"type": "error", "error": str(e)})
                     queue.put_nowait(None)
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             stream_task = loop.run_in_executor(_stream_executor, run_fast_stream)
 
             while True:
@@ -541,8 +602,15 @@ Current data source: {connector_name}
         """Call Claude API with tool support (non-streaming)."""
         tool_calls_made = []
         max_iterations = 25
+        recent_tool_calls = []  # Track recent tool calls to detect loops
 
         for iteration in range(max_iterations):
+            # Loop detection: if same tool called 3+ times in a row, break
+            if len(recent_tool_calls) >= 3:
+                last_three = recent_tool_calls[-3:]
+                if len(set(last_three)) == 1:
+                    logger.warning(f"Loop detected: {last_three[0]} called 3 times in a row, breaking")
+                    return f"I was having trouble querying the {datasource} database. The tool '{last_three[0]}' was called multiple times without progress. Please try a more specific query.", tool_calls_made
             @retry_on_overload
             def call_claude_api():
                 return self.client.messages.create(
@@ -567,6 +635,9 @@ Current data source: {connector_name}
 
             tool_results = []
             for tool_use in tool_use_blocks:
+                # Track tool calls for loop detection
+                recent_tool_calls.append(tool_use.name)
+
                 # Inject missing parameters using the service
                 tool_use.input = parameter_injection_service.inject_parameters(
                     tool_use.name,
@@ -574,6 +645,18 @@ Current data source: {connector_name}
                     datasource,
                     messages,
                 )
+
+                # Check if parameter injection set an error (e.g., missing query)
+                if "_error" in tool_use.input:
+                    error_msg = tool_use.input.pop("_error")
+                    logger.warning(f"Parameter injection error for {tool_use.name}: {error_msg}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": f"Error: {error_msg}",
+                        "is_error": True,
+                    })
+                    continue
 
                 logger.info(f"Claude calling tool: {tool_use.name} with args: {tool_use.input}")
 
@@ -631,8 +714,16 @@ Current data source: {connector_name}
     ) -> AsyncGenerator[str, None]:
         """Call Claude API with streaming, extended thinking, and tool support."""
         max_iterations = 25
+        recent_tool_calls = []  # Track recent tool calls to detect loops
 
         for iteration in range(max_iterations):
+            # Loop detection: if same tool called 3+ times in a row, break
+            if len(recent_tool_calls) >= 3:
+                last_three = recent_tool_calls[-3:]
+                if len(set(last_three)) == 1:
+                    logger.warning(f"Loop detected: {last_three[0]} called 3 times in a row, breaking")
+                    yield {"type": "text", "content": f"\n\nI was having trouble querying the {datasource} database. The tool '{last_three[0]}' was called multiple times without making progress. Please try a more specific query (e.g., 'SELECT * FROM providers LIMIT 10')."}
+                    return
             queue: asyncio.Queue = asyncio.Queue()
             final_message_holder = {"message": None}
 
@@ -675,7 +766,7 @@ Current data source: {connector_name}
                     queue.put_nowait({"type": "error", "error": str(e)})
                     queue.put_nowait(None)
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             stream_task = loop.run_in_executor(_stream_executor, run_claude_stream)
 
             tool_use_blocks = []
@@ -720,6 +811,9 @@ Current data source: {connector_name}
 
             tool_results = []
             for tool_use in tool_use_blocks:
+                # Track tool calls for loop detection
+                recent_tool_calls.append(tool_use.name)
+
                 # Inject missing parameters using the service
                 tool_use.input = parameter_injection_service.inject_parameters(
                     tool_use.name,
@@ -727,6 +821,19 @@ Current data source: {connector_name}
                     datasource,
                     messages,
                 )
+
+                # Check if parameter injection set an error (e.g., missing query)
+                if "_error" in tool_use.input:
+                    error_msg = tool_use.input.pop("_error")
+                    logger.warning(f"Parameter injection error for {tool_use.name}: {error_msg}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": f"Error: {error_msg}",
+                        "is_error": True,
+                    })
+                    yield {"type": "tool_end", "tool": tool_use.name, "success": False, "error": error_msg}
+                    continue
 
                 tool_feedback = get_quirky_thinking_message(tool_use.name)
                 yield {"type": "tool_start", "tool": tool_use.name, "description": tool_feedback}

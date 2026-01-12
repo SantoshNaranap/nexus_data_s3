@@ -312,6 +312,8 @@ class ParameterInjectionService:
                     logger.info(f"✅ Auto-injected query parameter: {query}")
                 else:
                     logger.warning(f"⚠️ Failed to construct query")
+                    # Set a helpful error message so Claude knows what went wrong
+                    tool_input["_error"] = "No SQL query provided. Please construct a SELECT statement."
 
             # Check if query references a table - if not, try to add context
             query = tool_input.get("query", "")

@@ -1,14 +1,13 @@
 """Authentication endpoints for email/password auth and JWT."""
 
-import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db, get_db_context
+from app.core.database import get_db
 from app.core.config import settings
 from app.core.logging import get_logger, security_logger
 from app.middleware.auth import get_current_user, get_current_user_optional
@@ -16,51 +15,6 @@ from app.models.database import User
 from app.services.auth_service import auth_service
 
 logger = get_logger(__name__)
-
-# Cache for pre-loaded digests (user_id -> digest_data)
-DIGEST_CACHE: dict = {}
-
-
-async def preload_digest_background(user_id: str, previous_login):
-    """Background task to pre-load the 'What You Missed' digest after login."""
-    try:
-        logger.info(f"Starting background digest pre-load for user {user_id}")
-
-        # Import here to avoid circular imports
-        from app.services.digest_service import digest_service
-
-        # Use a new database session for background task
-        async with get_db_context() as db:
-            result = await digest_service.generate_digest(
-                db=db,
-                user_id=user_id,
-                since=previous_login,
-            )
-
-            # Cache the result
-            DIGEST_CACHE[user_id] = {
-                "data": result,
-                "timestamp": asyncio.get_event_loop().time(),
-            }
-
-            logger.info(f"Digest pre-loaded for user {user_id} in {result.get('total_time_ms', 0):.0f}ms")
-
-    except Exception as e:
-        logger.error(f"Error pre-loading digest for user {user_id}: {e}")
-
-
-def get_cached_digest(user_id: str):
-    """Get cached digest if available and not stale (max 5 minutes)."""
-    cached = DIGEST_CACHE.get(user_id)
-    if cached:
-        age = asyncio.get_event_loop().time() - cached["timestamp"]
-        if age < 300:  # 5 minute cache
-            return cached["data"]
-        else:
-            # Remove stale cache
-            del DIGEST_CACHE[user_id]
-    return None
-
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -157,14 +111,12 @@ async def signup(
 async def login(
     request: LoginRequest,
     response: Response,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Authenticate user with email and password.
 
     Returns JWT token in HTTPOnly cookie on success.
-    Starts background pre-loading of "What You Missed" digest.
     """
     # Authenticate user
     user = await auth_service.authenticate_user(
@@ -180,15 +132,8 @@ async def login(
             detail="Invalid email or password",
         )
 
-    # Capture previous_login BEFORE updating (for digest)
-    previous_login = user.previous_login
-
     # Update login timestamps for "What You Missed" feature
     await auth_service.update_last_login(db, user)
-
-    # Start background pre-loading of digest (non-blocking)
-    asyncio.create_task(preload_digest_background(user.id, previous_login))
-    logger.info(f"Triggered background digest pre-load for user {user.email}")
 
     # Create JWT access token
     access_token = auth_service.create_access_token(

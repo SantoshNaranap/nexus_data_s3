@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Cache for tools to avoid repeated list_tools calls
 TOOLS_CACHE: Dict[str, Dict[str, Any]] = {}  # {datasource: {"tools": [...], "timestamp": float}}
 TOOLS_CACHE_TTL = 300  # 5 minutes TTL for tool cache
+TOOLS_CACHE_MAX_SIZE = 50  # Max datasources to cache (prevents unbounded growth)
 TOOLS_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to tools cache
 
 # Result cache for repeated queries (short TTL for freshness)
@@ -41,7 +42,20 @@ RESULT_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to result cache
 # Schema cache for MySQL tables (longer TTL - schemas don't change often)
 SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}  # {table_name: {"columns": [...], "timestamp": float}}
 SCHEMA_CACHE_TTL = 600  # 10 minutes TTL for schema cache
+SCHEMA_CACHE_MAX_SIZE = 200  # Max tables to cache (prevents unbounded growth)
 SCHEMA_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to schema cache
+
+
+def _evict_oldest_from_cache(cache: Dict[str, Dict[str, Any]], max_size: int) -> None:
+    """Evict oldest entries from cache to stay under max size."""
+    if len(cache) <= max_size:
+        return
+    # Sort by timestamp and remove oldest entries
+    sorted_keys = sorted(cache.keys(), key=lambda k: cache[k].get("timestamp", 0))
+    num_to_remove = len(cache) - max_size
+    for key in sorted_keys[:num_to_remove]:
+        del cache[key]
+    logger.debug(f"Evicted {num_to_remove} old entries from cache")
 
 # Connection idle timeout for persistent sessions
 CONNECTION_IDLE_TIMEOUT = 300  # 5 minutes - close idle connections to free resources
@@ -54,7 +68,6 @@ class MCPService:
         """Initialize MCP service using connector registry."""
         self._active_clients: Dict[str, tuple] = {}
         self._connection_locks: Dict[str, asyncio.Lock] = {}  # Per-datasource locks
-        self._persistent_sessions: Dict[str, Dict[str, Any]] = {}  # Persistent connections
         self._python_cmd = sys.executable
 
     def _get_connector_config(self, connector_id: str) -> Optional[Dict[str, Any]]:
@@ -124,6 +137,8 @@ class MCPService:
                         "tools": tools,
                         "timestamp": now,
                     }
+                    # Evict old entries if cache is too large
+                    _evict_oldest_from_cache(TOOLS_CACHE, TOOLS_CACHE_MAX_SIZE)
 
                 elapsed = time.time() - start
                 logger.info(f"Fetched and cached {len(tools)} tools for {datasource} in {elapsed:.2f}s")
@@ -481,114 +496,6 @@ class MCPService:
 
             return result_content
 
-    async def _create_persistent_session(
-        self,
-        datasource: str,
-        user_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        db: Optional[any] = None,
-    ):
-        """Create and store a persistent MCP session."""
-        # Get connector from registry
-        connector = get_connector(datasource)
-        if not connector:
-            raise ValueError(f"Unknown data source: {datasource}")
-
-        # Get server command from connector
-        command, args = connector.get_server_command()
-        connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
-
-        # Create server parameters
-        server = StdioServerParameters(
-            command=command,
-            args=args,
-            env={**os.environ.copy(), **connector_env},
-        )
-
-        # Start the stdio client and keep it alive
-        # We need to manage the context manually to keep it persistent
-        import subprocess
-
-        # Start subprocess directly
-        process = await asyncio.create_subprocess_exec(
-            command,
-            *args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ.copy(), **connector_env},
-        )
-
-        # Create MCP session using the process streams
-        from mcp.client.stdio import stdio_client
-
-        # Use the standard stdio_client context manager but store the session
-        # This is a workaround - we'll use the context manager but not exit it
-        client_cm = stdio_client(server)
-        read_write = await client_cm.__aenter__()
-        read, write = read_write
-
-        session = ClientSession(read, write)
-        await session.__aenter__()
-        await session.initialize()
-
-        # Store everything for cleanup later
-        self._persistent_sessions[datasource] = {
-            "session": session,
-            "client_cm": client_cm,
-            "process": process,
-            "last_used": time.time(),
-            "created_at": time.time(),
-        }
-
-        logger.info(f"✅ Persistent session created for {datasource}")
-
-    async def _close_persistent_session(self, datasource: str):
-        """Close a persistent session and clean up resources."""
-        if datasource in self._persistent_sessions:
-            session_data = self._persistent_sessions[datasource]
-            try:
-                session = session_data.get("session")
-                if session:
-                    await session.__aexit__(None, None, None)
-
-                client_cm = session_data.get("client_cm")
-                if client_cm:
-                    await client_cm.__aexit__(None, None, None)
-
-                process = session_data.get("process")
-                if process:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        process.kill()
-
-                logger.info(f"🔌 Closed persistent session for {datasource}")
-            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
-                logger.warning(f"Error closing persistent session for {datasource}: {e}")
-            finally:
-                del self._persistent_sessions[datasource]
-
-    async def close_all_persistent_sessions(self):
-        """Close all persistent sessions. Call this on app shutdown."""
-        datasources = list(self._persistent_sessions.keys())
-        for datasource in datasources:
-            await self._close_persistent_session(datasource)
-        logger.info(f"🔌 Closed all {len(datasources)} persistent sessions")
-
-    async def cleanup_idle_connections(self):
-        """Close connections that have been idle too long."""
-        now = time.time()
-        to_close = []
-        for datasource, data in self._persistent_sessions.items():
-            if now - data.get("last_used", 0) > CONNECTION_IDLE_TIMEOUT:
-                to_close.append(datasource)
-
-        for datasource in to_close:
-            logger.info(f"🧹 Closing idle connection for {datasource}")
-            await self._close_persistent_session(datasource)
-
     # ==================== Schema Caching for MySQL ====================
 
     def get_cached_schema(self, table_name: str) -> Optional[str]:
@@ -605,7 +512,9 @@ class MCPService:
             "columns": columns,
             "timestamp": time.time(),
         }
-        logger.info(f"📋 Cached schema for {table_name}")
+        # Evict old entries if cache is too large
+        _evict_oldest_from_cache(SCHEMA_CACHE, SCHEMA_CACHE_MAX_SIZE)
+        logger.info(f"Cached schema for {table_name}")
 
     def get_all_cached_schemas(self) -> Dict[str, str]:
         """Get all cached schemas that are still valid."""

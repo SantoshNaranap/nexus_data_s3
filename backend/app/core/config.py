@@ -3,7 +3,7 @@
 import os
 import logging
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, ConfigDict
 from typing import List
 from cryptography.fernet import Fernet
 
@@ -161,10 +161,11 @@ class Settings(BaseSettings):
             return v.strip()
         return _get_or_generate_encryption_key()
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "ignore"  # Ignore extra fields in .env
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore",  # Ignore extra fields in .env
+    )
 
 
 settings = Settings()

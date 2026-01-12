@@ -55,6 +55,13 @@ Your task is to:
 3. Resolve any conflicts or inconsistencies
 4. Generate a clear, unified response
 
+ACCURACY RULES - CRITICAL:
+- ONLY report information that is EXPLICITLY present in the provided data
+- NEVER invent, fabricate, or assume any details not in the source data
+- If data is missing or incomplete, say so - do NOT fill in gaps with assumptions
+- Quote actual content when relevant, do not embellish or add fictional details
+- If you cannot answer from the data provided, say "Information not available"
+
 Guidelines:
 - Present information in a logical, organized manner
 - Use tables, lists, and markdown formatting for clarity
@@ -154,6 +161,21 @@ Response Format:
         
         return "\n\n---\n".join(formatted_parts)
 
+    def _is_simple_query(self, results: List[SourceQueryResult]) -> bool:
+        """
+        Determine if a query is simple enough to use Haiku instead of Sonnet.
+
+        Simple queries are:
+        - Single source only
+        - Result data is not excessively large
+        - No complex cross-source synthesis needed
+        """
+        if len(results) != 1:
+            return False
+
+        # Single source - use Haiku for faster responses
+        return True
+
     async def synthesize(
         self,
         query: str,
@@ -162,19 +184,22 @@ Response Format:
     ) -> str:
         """
         Synthesize results from multiple sources into a unified response.
-        
+
+        Uses Haiku for simple single-source queries (faster),
+        Sonnet for complex multi-source queries (higher quality).
+
         Args:
             query: The original user query
             results: List of results from each source
             plan: Optional execution plan for context
-            
+
         Returns:
             Synthesized natural language response
         """
         # Handle edge cases
         if not results:
             return "I couldn't retrieve any data from the requested sources. Please try again or check your credentials."
-        
+
         # Check if all sources failed
         successful_results = [r for r in results if r.success]
         if not successful_results:
@@ -182,25 +207,25 @@ Response Format:
                 f"- {r.datasource}: {r.error}" for r in results
             ])
             return f"All data sources encountered errors:\n{error_summary}\n\nPlease check your credentials and try again."
-        
+
         # Format results for synthesis
         formatted_results = self._format_source_results(results)
-        
+
         # Build context about what was queried
         sources_queried = [r.datasource for r in results]
         sources_succeeded = [r.datasource for r in successful_results]
         sources_failed = [r.datasource for r in results if not r.success]
-        
+
         context = f"""
 Sources queried: {', '.join(sources_queried)}
 Successful: {', '.join(sources_succeeded)}
 Failed: {', '.join(sources_failed) if sources_failed else 'None'}
 """
-        
+
         # Add plan context if available
         if plan:
             context += f"\nPlan reasoning: {plan.plan_reasoning}"
-        
+
         # Build synthesis prompt
         synthesis_prompt = f"""USER QUERY: "{query}"
 
@@ -215,23 +240,26 @@ DATA FROM SOURCES:
 Based on the data above, provide a comprehensive response to the user's query.
 Synthesize information from all successful sources and highlight any cross-source insights."""
 
-        logger.info(f"Synthesizing results from {len(successful_results)} sources")
-        
+        # Choose model based on query complexity
+        is_simple = self._is_simple_query(results)
+        model = "claude-3-5-haiku-20241022" if is_simple else "claude-sonnet-4-5-20250929"
+
+        logger.info(f"Synthesizing results from {len(successful_results)} sources using {model}")
+
         try:
-            # Use Sonnet for high-quality synthesis
             response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model=model,
                 max_tokens=4096,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],
             )
-            
+
             synthesized = response.content[0].text
-            
+
             # Add source attribution footer if multiple sources
             if len(sources_succeeded) > 1:
                 synthesized += f"\n\n---\n*Data synthesized from: {', '.join(sources_succeeded)}*"
-            
+
             return synthesized
             
         except (APIError, APIConnectionError, RateLimitError) as e:
@@ -316,10 +344,14 @@ DATA FROM SOURCES:
 
 Synthesize a comprehensive response to the user's query."""
 
+        # Choose model based on query complexity
+        is_simple = self._is_simple_query(results)
+        model = "claude-3-5-haiku-20241022" if is_simple else "claude-sonnet-4-5-20250929"
+
         try:
             # Stream the synthesis
             stream = self.client.messages.stream(
-                model="claude-sonnet-4-5-20250929",
+                model=model,
                 max_tokens=4096,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],

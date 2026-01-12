@@ -258,14 +258,19 @@ class DigestService:
         # Build context for synthesis
         synthesis_prompt = f"""Create a concise digest summary of updates since {since.strftime('%B %d, %Y at %I:%M %p')}.
 
-Group updates by source and highlight the most important items.
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+- ONLY include information that is EXPLICITLY present in the Source Data below
+- NEVER invent, fabricate, or assume any message content, names, times, or details
+- If data is incomplete or unclear, say "Limited data available" - do NOT fill in gaps
+- Quote actual message text when available, do not paraphrase or embellish
+- If no data is provided for a source, say "No updates found"
 
 FORMATTING RULES:
 - NO emojis anywhere in the response
 - Use markdown headers (##, ###) for sections
 - Use bullet points for individual items
 - Keep it scannable and professional
-- Prioritize actionable items
+- Only report what is explicitly in the data
 
 Source Data:
 """
@@ -278,13 +283,15 @@ Source Data:
             elif result.summary:
                 synthesis_prompt += result.summary
 
-        # Use the result synthesizer to create the summary
+        # Use Claude Haiku for fast digest synthesis
         try:
-            summary = await result_synthesizer._call_synthesis_llm(
-                synthesis_prompt,
-                "Create a digest summary"
+            from app.services.claude_client import claude_client
+            response = claude_client.client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=2048,
+                messages=[{"role": "user", "content": synthesis_prompt}],
             )
-            return summary
+            return response.content[0].text
         except Exception as e:
             logger.error(f"Error synthesizing digest: {e}")
             # Fallback to simple concatenation

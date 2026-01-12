@@ -1,7 +1,7 @@
 """Database models for multi-tenant support."""
 
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Index
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 from datetime import datetime
 import uuid

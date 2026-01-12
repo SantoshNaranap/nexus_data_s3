@@ -146,8 +146,14 @@ RESPONSE GIVEN: {response[:800]}
 
 CONTEXT: This is a {datasource} data source. Relevant concepts: {datasource_hints.get(datasource, 'data records, details, related items')}
 
+ACCURACY RULES - CRITICAL:
+- ONLY reference names, dates, items, or entities that appear EXPLICITLY in the RESPONSE GIVEN above
+- Do NOT invent or assume any entities, people, projects, or data that are not in the response
+- If the response has limited data, generate broader exploratory questions instead of specific ones
+- Never assume what data might exist - only reference what was actually returned
+
 Generate questions that:
-1. DIG DEEPER - Ask about specific details, people, or items mentioned in the response
+1. DIG DEEPER - Ask about specific details mentioned in the response (only if they exist)
 2. COMPARE/CONTRAST - Explore patterns, changes over time, or comparisons
 3. TAKE ACTION - Suggest logical next steps based on what was found
 

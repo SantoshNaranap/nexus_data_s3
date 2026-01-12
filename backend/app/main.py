@@ -59,13 +59,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Close persistent MCP connections on shutdown
-    try:
-        await mcp_service.close_all_persistent_sessions()
-        logger.info("MCP persistent connections closed")
-    except Exception as e:
-        logger.error(f"Error closing MCP connections: {e}")
-
     # Close database connections on shutdown
     try:
         await close_db()

@@ -227,6 +227,48 @@ class ParameterExtractor:
         logger.info(f"No database name found in messages")
         return None
 
+    def extract_table_names_from_query(self, content: str) -> List[str]:
+        """Extract potential table names from a natural language query.
+
+        Handles queries like:
+        - "tell me about providers and claims"
+        - "what are the providers and claims"
+        - "show me data from users, orders, and products"
+        """
+        content_lower = content.lower()
+
+        # Remove common filler words and analytical terms
+        filler_words = {
+            # Common filler words
+            'tell', 'me', 'about', 'what', 'are', 'the', 'show', 'get',
+            'give', 'list', 'display', 'find', 'search', 'look', 'up',
+            'information', 'data', 'details', 'info', 'from', 'in', 'on',
+            'can', 'you', 'please', 'i', 'want', 'to', 'know', 'see',
+            'how', 'many', 'much', 'all', 'some', 'any', 'recent', 'latest',
+            # Analytical/aggregation terms (NOT table names)
+            'number', 'count', 'total', 'sum', 'average', 'avg', 'max', 'min',
+            'each', 'per', 'every', 'type', 'types', 'kind', 'kinds',
+            'group', 'grouped', 'by', 'for', 'with', 'between', 'and', 'or',
+            # SQL keywords
+            'select', 'where', 'order', 'limit', 'having', 'join', 'left', 'right',
+            'inner', 'outer', 'distinct', 'unique', 'null', 'not', 'like',
+        }
+
+        # Extract words that could be table names
+        # Split by 'and', commas, or spaces
+        parts = re.split(r'\s+and\s+|\s*,\s*|\s+', content_lower)
+
+        potential_tables = []
+        for part in parts:
+            # Clean the word
+            word = re.sub(r'[^a-z0-9_]', '', part)
+            # Keep if it looks like a table name (not a filler word, reasonable length)
+            if word and word not in filler_words and len(word) >= 3:
+                potential_tables.append(word)
+
+        logger.info(f"Potential table names from query: {potential_tables}")
+        return potential_tables
+
     def construct_mysql_query(self, messages: List[dict]) -> Optional[str]:
         """Construct a SELECT query from natural language in user messages."""
         # Look through user messages for query intentions
@@ -236,8 +278,22 @@ class ParameterExtractor:
                 if isinstance(content, str):
                     content_lower = content.lower()
 
-                    # Extract table name
+                    # First try the standard table extraction
                     table_name = self.extract_table_name(messages)
+
+                    # If that fails, try to extract table names from natural language
+                    if not table_name:
+                        potential_tables = self.extract_table_names_from_query(content)
+                        if potential_tables:
+                            # Use the first potential table, or construct a multi-table query
+                            if len(potential_tables) == 1:
+                                table_name = potential_tables[0]
+                            elif len(potential_tables) >= 2:
+                                # For "providers and claims", construct a JOIN or UNION query
+                                # For now, just query the first table - user can ask for the second
+                                table_name = potential_tables[0]
+                                logger.info(f"Multiple tables mentioned ({potential_tables}), using first: {table_name}")
+
                     if not table_name:
                         return None
 

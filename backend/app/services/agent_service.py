@@ -157,12 +157,18 @@ class AgentOrchestrator:
                 status = AgentTaskStatus.COMPLETED
             
             # PHASE 3: SYNTHESIS
-            # Combine results into unified response
-            synthesized_response = await result_synthesizer.synthesize(
-                query=request.query,
-                results=source_results,
-                plan=plan,
-            )
+            # For single-source queries, use the chat_service response directly
+            # (it already generated a response - no need to call Claude again)
+            if len(source_results) == 1 and source_results[0].success and source_results[0].data:
+                synthesized_response = source_results[0].data
+                logger.info("Single-source query - using chat_service response directly (skipping re-synthesis)")
+            else:
+                # Multi-source or failed queries need result_synthesizer
+                synthesized_response = await result_synthesizer.synthesize(
+                    query=request.query,
+                    results=source_results,
+                    plan=plan,
+                )
             
             total_time = (time.time() - start_time) * 1000
             logger.info(f"✅ Multi-source query completed in {total_time:.0f}ms "
@@ -351,20 +357,33 @@ class AgentOrchestrator:
                 data={},
                 message="🧠 Synthesizing results...",
             )
-            
-            # Stream the synthesis
-            synthesis_chunks = []
-            async for chunk in result_synthesizer.synthesize_stream(
-                query=request.query,
-                results=source_results,
-                plan=plan,
-            ):
-                synthesis_chunks.append(chunk)
-                yield AgentStreamEvent(
-                    event_type="synthesis_chunk",
-                    data={"content": chunk},
-                    message=None,
-                )
+
+            # For single-source queries, use the chat_service response directly
+            # (it already generated a response - no need to call Claude again)
+            if len(source_results) == 1 and source_results[0].success and source_results[0].data:
+                # Stream the existing response in chunks
+                response_data = source_results[0].data
+                chunk_size = 100  # Characters per chunk for smooth streaming
+                for i in range(0, len(response_data), chunk_size):
+                    chunk = response_data[i:i + chunk_size]
+                    yield AgentStreamEvent(
+                        event_type="synthesis_chunk",
+                        data={"content": chunk},
+                        message=None,
+                    )
+                logger.info("Single-source query - streaming chat_service response directly")
+            else:
+                # Multi-source or failed queries need result_synthesizer
+                async for chunk in result_synthesizer.synthesize_stream(
+                    query=request.query,
+                    results=source_results,
+                    plan=plan,
+                ):
+                    yield AgentStreamEvent(
+                        event_type="synthesis_chunk",
+                        data={"content": chunk},
+                        message=None,
+                    )
             
             # Emit completion
             successful_sources = [r.datasource for r in source_results if r.success]

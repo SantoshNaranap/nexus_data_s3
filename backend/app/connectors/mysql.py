@@ -83,57 +83,49 @@ class MySQLConnector(BaseConnector):
     @property
     def system_prompt_addition(self) -> str:
         return """
-MYSQL TOOLS - COMPREHENSIVE GUIDE:
+MYSQL QUERY GUIDE:
 
-**PRIMARY TOOLS:**
-- `list_tables(database)` - List ALL tables in a database. Start here.
-- `describe_table(table)` - Get table schema (columns, types, keys)
-- `execute_query(query)` - Run SELECT queries. Use for data retrieval.
-- `get_table_stats(table)` - Get row count and table statistics
+**TOOLS:**
+- `execute_query(query)` - Run SQL queries. This is the PRIMARY tool.
+- `list_tables()` - List tables (use only if you truly don't know the schema)
+- `describe_table(table)` - Get schema for one table
+- `get_table_stats(table)` - Get row count
 
-**CRITICAL RULES - NEVER VIOLATE:**
-1. ALWAYS call `list_tables()` first if you don't know the tables
-2. ALWAYS call `describe_table()` before writing complex queries
-3. NEVER say "I don't have access" without trying list_tables first
-4. NEVER say "table not found" without listing tables first
-5. ALWAYS show the actual query results - don't summarize away data
-6. Use LIMIT to prevent timeouts, but show enough data (LIMIT 50-100)
+**CRITICAL: JUST RUN QUERIES - DON'T LOOP**
+When the user asks about specific tables (providers, claims, users, etc.):
+1. IMMEDIATELY construct and run the SQL query
+2. Do NOT call list_tables or get_table_stats first
+3. If a query fails due to unknown table/column, THEN check schema
 
-**WORKFLOW EXAMPLES:**
+**ANALYTICAL QUERY EXAMPLES:**
 
-"What's in this database?" or "Show tables":
-→ list_tables()
-→ Display ALL tables with their purposes
+"Count of providers" or "how many providers":
+→ execute_query(query="SELECT COUNT(*) as total_providers FROM providers")
 
-"What does [table] look like?" or "Describe [table]":
-→ describe_table(table="table_name")
-→ Show ALL columns with types
+"Providers by type" or "count by type":
+→ execute_query(query="SELECT type, COUNT(*) as count FROM providers GROUP BY type")
 
-"Show me data from [table]":
-→ execute_query(query="SELECT * FROM table_name LIMIT 50")
-→ Display ALL returned rows in a nice table
+"Claims for each provider type" (requires JOIN):
+→ execute_query(query="SELECT p.type, COUNT(c.id) as claim_count FROM providers p LEFT JOIN claims c ON p.id = c.provider_id GROUP BY p.type")
 
-"Find [something] in [table]":
-→ First describe_table() to know the columns
-→ Then execute_query(query="SELECT * FROM table WHERE column LIKE '%something%' LIMIT 50")
+"Tell me about providers and claims":
+→ Run multiple queries:
+  1. SELECT COUNT(*) FROM providers
+  2. SELECT type, COUNT(*) FROM providers GROUP BY type
+  3. SELECT p.type, COUNT(c.id) FROM providers p LEFT JOIN claims c ON p.id = c.provider_id GROUP BY p.type
 
-"How many rows in [table]?":
-→ get_table_stats(table="table_name") or execute_query(query="SELECT COUNT(*) FROM table")
+**QUERY BUILDING RULES:**
+- User says "count" or "how many" → use COUNT(*)
+- User says "by type" or "each type" → use GROUP BY
+- User says "for each" or "per" → likely needs a JOIN
+- Always add LIMIT for SELECT * queries (LIMIT 50)
+- Don't add LIMIT for COUNT/aggregate queries
 
-"Latest [records]":
-→ execute_query(query="SELECT * FROM table ORDER BY id DESC LIMIT 20")
-
-**SMART QUERY BUILDING:**
-- If user says "latest" or "recent" → ORDER BY id DESC or created_at DESC
-- If user says "find" or "search" → use WHERE with LIKE '%term%'
-- If user says "count" or "how many" → use COUNT(*)
-- Always add LIMIT (default to 50) unless counting
-
-**NEVER DO THIS:**
-- Don't ask which database - use the configured one
-- Don't refuse to query - just add appropriate LIMIT
-- Don't say "I need the table name" - call list_tables() first
-- Don't execute DROP/DELETE without explicit user confirmation
+**AVOID THESE MISTAKES:**
+- DON'T call get_table_stats repeatedly - just run the query
+- DON'T explore schema if user already named the tables
+- DON'T ask which database - use the configured one
+- DON'T call the same tool twice in a row
 """
 
     def get_direct_routing(self, message: str) -> Optional[List[Dict[str, Any]]]:
