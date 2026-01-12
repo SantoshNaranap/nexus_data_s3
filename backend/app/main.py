@@ -75,6 +75,7 @@ app = FastAPI(
     description="Backend API for ConnectorMCP - Multi-source data connector with MCP",
     version=settings.version,
     lifespan=lifespan,
+    root_path="/api",  # Required when behind ALB/ingress that strips /api prefix
 )
 
 
