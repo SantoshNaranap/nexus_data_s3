@@ -4,6 +4,7 @@ uvicorn[standard]>=0.27.0
 pydantic>=2.8.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
+email-validator>=2.1.0
 
 # MCP and LLM
 mcp>=1.0.0
