@@ -21,6 +21,11 @@ RUN pip install /connectors/jira \
 # Copy application code
 COPY backend .
 
+# Copy .env file (downloaded from S3 during build)
+# This allows pydantic-settings to read environment variables from .env
+# Build script must download .env from S3 before running docker-compose build
+COPY .env .env
+
 # Expose port
 EXPOSE 8000
 
