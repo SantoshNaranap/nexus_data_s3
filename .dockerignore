@@ -17,8 +17,9 @@ dist-ssr/
 *.local
 
 # Environment
-.env
 .env.local
+# Allow .env file for backend container (downloaded from S3 during build)
+!.env
 
 # Testing
 .coverage

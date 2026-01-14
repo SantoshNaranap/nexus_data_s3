@@ -134,8 +134,25 @@ fi
 
 if [[ "$GIT_BRANCH" == "santosh-dev" || "$GIT_BRANCH" == "devops-fix" || "$GIT_BRANCH" == "preprod" ]];
 then
-# Download .env from S3, create empty file if download fails
-aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs || touch .env
+# Download .env from S3 - REQUIRED, fail if download fails
+echo "Downloading .env from S3..."
+if ! aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs; then
+  echo "ERROR: Failed to download .env from S3. Build aborted."
+  exit 1
+fi
+
+# Verify .env file exists and is not empty
+if [ ! -f .env ]; then
+  echo "ERROR: .env file not found after download. Build aborted."
+  exit 1
+fi
+
+if [ ! -s .env ]; then
+  echo "ERROR: .env file is empty. Build aborted."
+  exit 1
+fi
+
+echo "Successfully downloaded .env from S3 ($(wc -l < .env) lines)"
 DevBuild
 elif [[ "$GIT_BRANCH" == "master" ]];
 then
