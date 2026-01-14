@@ -70,12 +70,14 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
+# Note: root_path is NOT set because ALB forwards /api/* requests with prefix intact
+# If your ALB strips the /api prefix, uncomment root_path="/api" below
 app = FastAPI(
     title="ConnectorMCP API",
     description="Backend API for ConnectorMCP - Multi-source data connector with MCP",
     version=settings.version,
     lifespan=lifespan,
-    root_path="/api",  # Required when behind ALB/ingress that strips /api prefix
+    # root_path="/api",  # Only uncomment if ALB strips /api prefix before forwarding
 )
 
 

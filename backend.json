@@ -38,7 +38,7 @@
                 }
             ],
             "essential": true,
-            "image": "891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-backend:devops-fix-1",
+            "image": "891377352857.dkr.ecr.us-east-1.amazonaws.com/mosaic-backend:GIT_COMMIT",
             "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
