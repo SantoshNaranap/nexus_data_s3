@@ -15,6 +15,7 @@ python-multipart==0.0.6
 
 # Authentication and Database
 passlib[bcrypt]>=1.7.4
+bcrypt>=3.2.0,<4.0.0  # Pin to <4.0.0 for passlib compatibility (4.0+ removed __about__ attribute)
 python-jose[cryptography]>=3.3.0
 itsdangerous>=2.1.2
 aiomysql>=0.2.0
