@@ -134,7 +134,8 @@ fi
 
 if [[ "$GIT_BRANCH" == "santosh-dev" || "$GIT_BRANCH" == "devops-fix" || "$GIT_BRANCH" == "preprod" ]];
 then
-aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs
+# Download .env from S3, create empty file if download fails
+aws s3 cp s3://kaaylabs-operations-new/config/mosaic/.env . --profile kaaylabs || touch .env
 DevBuild
 elif [[ "$GIT_BRANCH" == "master" ]];
 then
