@@ -258,12 +258,18 @@ class DigestService:
         # Build context for synthesis
         synthesis_prompt = f"""Create a concise digest summary of updates since {since.strftime('%B %d, %Y at %I:%M %p')}.
 
-CRITICAL RULES - YOU MUST FOLLOW THESE:
+CRITICAL RULES - ZERO TOLERANCE FOR HALLUCINATION:
 - ONLY include information that is EXPLICITLY present in the Source Data below
 - NEVER invent, fabricate, or assume any message content, names, times, or details
 - If data is incomplete or unclear, say "Limited data available" - do NOT fill in gaps
-- Quote actual message text when available, do not paraphrase or embellish
 - If no data is provided for a source, say "No updates found"
+
+VERBATIM CONTENT REQUIREMENT:
+- When showing message content, quotes, or text from sources - use EXACT text, character for character
+- NEVER paraphrase, summarize creatively, or "improve" message content
+- NEVER add emojis, punctuation, or words that aren't in the original text
+- If source says "Ok. Sure" display exactly "Ok. Sure" NOT "Ok! Sure 🔥" or "Okay, sure!"
+- Use quotation marks for verbatim content: "exact text here"
 
 FORMATTING RULES:
 - NO emojis anywhere in the response
@@ -286,9 +292,22 @@ Source Data:
         # Use Claude Haiku for fast digest synthesis
         try:
             from app.services.claude_client import claude_client
+
+            # System prompt to enforce accuracy
+            system_prompt = """You are a precise data summarizer. Your ONLY job is to report exactly what is in the source data.
+
+ABSOLUTE RULES:
+- Report ONLY information explicitly present in the provided data
+- NEVER invent, assume, or embellish any content
+- Quote text exactly as it appears - character for character
+- NEVER add emojis to quoted content
+- If data says "ok" report "ok" not "OK" or "okay" or "ok!"
+- No emojis anywhere in your response"""
+
             response = claude_client.client.messages.create(
                 model="claude-3-5-haiku-20241022",
                 max_tokens=2048,
+                system=system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],
             )
             return response.content[0].text
