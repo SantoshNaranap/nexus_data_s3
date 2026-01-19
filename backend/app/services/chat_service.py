@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.mcp_service import mcp_service
+from app.services.credential_service import credential_service
 from app.models.database import ChatHistory
 from app.services.parameter_injection_service import parameter_injection_service
 from app.services.response_formatter import response_formatter
@@ -116,14 +117,26 @@ def retry_on_overload(func):
 
 
 class ChatService:
-    """Service for handling chat interactions with Claude and MCP tools."""
+    """
+    Service for handling chat interactions with Claude and MCP tools.
+
+    Session Architecture (Production-Ready):
+    - Chat history is persisted to MySQL database via ChatHistory model
+    - Sessions are tied to user_id + session_id for multi-device support
+    - No in-memory state = horizontally scalable (any instance can serve any user)
+    - For Redis-backed sessions, replace get_chat_history/save_chat_history
+
+    Note: This service is stateless by design. All session state is in the database.
+    """
 
     def __init__(self):
         self.client = Anthropic(api_key=settings.anthropic_api_key)
-        self.sessions: Dict[str, List[Dict]] = {}  # In-memory session storage
+        # NOTE: Session storage is DATABASE-BACKED via ChatHistory model
+        # See save_chat_history() and get_chat_history() methods
+        # This allows horizontal scaling - any server instance can serve any user
 
     # =========================================================================
-    # SESSION & HISTORY MANAGEMENT
+    # SESSION & HISTORY MANAGEMENT (Database-backed for production)
     # =========================================================================
 
     async def save_chat_history(
@@ -231,13 +244,22 @@ class ChatService:
 
         base_prompt = f"""You are an assistant that queries {connector_name} data for the user.
 
-ACCURACY RULES - ABSOLUTELY CRITICAL:
-- ONLY report information that is EXPLICITLY returned by the tools
+ACCURACY RULES - ABSOLUTELY CRITICAL (ZERO TOLERANCE FOR HALLUCINATION):
+- ONLY report information that is EXPLICITLY returned by the tools - word for word
 - NEVER invent, fabricate, or assume ANY details not in the tool results
-- Do NOT make up message content, names, timestamps, or any other data
+- Do NOT make up message content, names, timestamps, emojis, or any other data
 - If tool results are empty or limited, say so - do NOT fill in gaps with fictional data
-- Quote actual data from tool results, do not embellish or add invented details
+- When quoting messages, use EXACT TEXT from tool results - do not add or change anything
 - If you cannot answer from the tool data, say "This information was not found in the results"
+
+ZERO HALLUCINATION - READ THIS CAREFULLY:
+- NEVER invent quotes or message content that doesn't exist in tool results
+- NEVER add emojis, reactions, or sentiments that aren't in the actual data
+- NEVER attribute messages to people if not explicitly in the tool results
+- If a message has an emoji in the tool data, include it; if not, DO NOT ADD ONE
+- If you're uncertain whether something was said, DO NOT include it
+- It is BETTER to show less information than to show WRONG information
+- Fabricating conversation content is a CRITICAL FAILURE - avoid at all costs
 
 CRITICAL FORMATTING RULES - MANDATORY:
 - ABSOLUTELY NO EMOJIS - Never use emoji characters anywhere in your response
@@ -411,6 +433,9 @@ Current data source: {connector_name}
     # MESSAGE PROCESSING (STREAMING)
     # =========================================================================
 
+    # Datasources that require per-user OAuth (no fallback to default credentials)
+    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira"}
+
     async def process_message_stream(
         self,
         message: str,
@@ -422,6 +447,20 @@ Current data source: {connector_name}
     ) -> AsyncGenerator[str, None]:
         """Process a chat message with streaming response."""
         start_time = time.time()
+
+        # EARLY CHECK: For OAuth-required datasources, verify user has connected
+        if datasource.lower() in self.OAUTH_REQUIRED_DATASOURCES:
+            if user_id and db:
+                has_creds = await credential_service.has_credentials(
+                    datasource=datasource,
+                    db=db,
+                    user_id=user_id,
+                )
+                if not has_creds:
+                    error_msg = f"## Connect Your {datasource.title()} Account\n\nYou need to connect your {datasource.title()} account before you can use this feature.\n\n**To connect:**\n1. Click the **Settings** icon (gear) in the sidebar\n2. Select **{datasource.title()}**\n3. Click **Connect with {datasource.title()}**\n\nOnce connected, you'll be able to access your {datasource.title()} data."
+                    yield {"type": "text", "content": error_msg}
+                    return
+
         force_refresh = mcp_service.should_force_refresh(message)
 
         # Check ultra-fast path (skip Claude entirely for simple queries)

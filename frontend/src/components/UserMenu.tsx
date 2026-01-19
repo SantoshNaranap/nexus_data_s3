@@ -31,7 +31,11 @@ export default function UserMenu() {
 
   if (!user) return null
 
-  const getInitials = (name: string) => {
+  const getInitials = (name: string | null | undefined) => {
+    if (!name) {
+      // Fallback to email initial if no name
+      return user?.email?.charAt(0).toUpperCase() || '?'
+    }
     return name
       .split(' ')
       .map((part) => part[0])
@@ -39,6 +43,9 @@ export default function UserMenu() {
       .toUpperCase()
       .slice(0, 2)
   }
+
+  // Display name with fallback to email
+  const displayName = user.name || user.email?.split('@')[0] || 'User'
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -52,12 +59,12 @@ export default function UserMenu() {
           {user.profilePicture ? (
             <img
               src={user.profilePicture}
-              alt={user.name}
+              alt={displayName}
               className="w-8 h-8 rounded-full"
             />
           ) : (
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white text-sm font-medium">
-              {getInitials(user.name)}
+              {getInitials(displayName)}
             </div>
           )}
         </div>
@@ -72,17 +79,17 @@ export default function UserMenu() {
               {user.profilePicture ? (
                 <img
                   src={user.profilePicture}
-                  alt={user.name}
+                  alt={displayName}
                   className="w-10 h-10 rounded-full"
                 />
               ) : (
                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white text-sm font-medium">
-                  {getInitials(user.name)}
+                  {getInitials(displayName)}
                 </div>
               )}
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                  {user.name}
+                  {displayName}
                 </p>
                 <p className="text-xs text-gray-600 dark:text-gray-400 truncate">
                   {user.email}

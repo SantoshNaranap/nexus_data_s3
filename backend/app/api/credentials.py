@@ -1,19 +1,26 @@
-"""Credentials API endpoints."""
+"""Credentials API endpoints with per-user OAuth support."""
 
 import logging
+import secrets
 from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException, Response, Request, Depends
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.credential_service import credential_service
-from app.middleware.auth import get_current_user_optional as get_current_user
+from app.services.user_oauth_service import user_oauth_service
+from app.middleware.auth import get_current_user_optional as get_current_user, get_current_user as require_user
 from app.core.database import get_db
+from app.core.config import settings
 from app.models.database import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
+
+# In-memory store for OAuth states (in production, use Redis)
+oauth_states: dict = {}
 
 
 class CredentialsSaveRequest(BaseModel):
@@ -168,4 +175,125 @@ async def delete_credentials(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete credentials: {str(e)}",
+        )
+
+
+# ============ Per-User OAuth Endpoints ============
+
+
+@router.get("/oauth/available")
+async def get_oauth_availability():
+    """Check which datasources have OAuth configured."""
+    return {
+        "slack": user_oauth_service.is_oauth_configured("slack"),
+        "github": user_oauth_service.is_oauth_configured("github"),
+        "jira": user_oauth_service.is_oauth_configured("jira"),
+    }
+
+
+@router.get("/{datasource}/oauth")
+async def start_oauth(
+    datasource: str,
+    user: User = Depends(require_user),
+):
+    """
+    Start OAuth flow for a datasource.
+
+    Redirects user to the OAuth provider (Slack/GitHub/Jira) to authorize access.
+    After authorization, user is redirected back to the callback URL.
+    """
+    datasource_lower = datasource.lower()
+
+    if datasource_lower not in ["slack", "github", "jira"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"OAuth not supported for datasource: {datasource}",
+        )
+
+    if not user_oauth_service.is_oauth_configured(datasource_lower):
+        raise HTTPException(
+            status_code=501,
+            detail=f"OAuth is not configured for {datasource}. Please contact your administrator.",
+        )
+
+    # Generate state with user context
+    state = user_oauth_service.generate_state()
+    oauth_states[state] = {
+        "user_id": user.id,
+        "datasource": datasource_lower,
+    }
+
+    # Get authorization URL
+    auth_url = user_oauth_service.get_auth_url(datasource_lower, state, user.id)
+
+    logger.info(f"User {user.email} starting OAuth for {datasource}")
+    return RedirectResponse(url=auth_url)
+
+
+@router.get("/{datasource}/oauth/callback")
+async def oauth_callback(
+    datasource: str,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Handle OAuth callback from provider.
+
+    Exchanges the authorization code for tokens, stores them securely,
+    and redirects user back to the app.
+    """
+    datasource_lower = datasource.lower()
+
+    # Handle OAuth errors
+    if error:
+        logger.error(f"{datasource} OAuth error: {error}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_error={datasource}&message={error}"
+        )
+
+    # Validate required parameters
+    if not code or not state:
+        logger.error(f"Missing code or state in {datasource} OAuth callback")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_error={datasource}&message=missing_params"
+        )
+
+    # Validate state
+    if state not in oauth_states:
+        logger.error(f"Invalid OAuth state for {datasource}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_error={datasource}&message=invalid_state"
+        )
+
+    state_data = oauth_states.pop(state)
+    user_id = state_data["user_id"]
+
+    try:
+        # Exchange code for tokens
+        token_response = await user_oauth_service.exchange_code(datasource_lower, code)
+
+        # Process response into credentials format
+        credentials = await user_oauth_service.process_oauth_response(datasource_lower, token_response)
+
+        # Save credentials for user
+        await credential_service.save_credentials(
+            datasource=datasource_lower,
+            credentials=credentials,
+            db=db,
+            user_id=user_id,
+        )
+
+        logger.info(f"OAuth successful for user {user_id[:8]}... datasource: {datasource}")
+
+        # Redirect back to app with success
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_success={datasource}"
+        )
+
+    except Exception as e:
+        logger.error(f"{datasource} OAuth callback error: {e}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_error={datasource}&message=oauth_failed"
         )

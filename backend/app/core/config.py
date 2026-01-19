@@ -98,23 +98,54 @@ class Settings(BaseSettings):
     shopify_access_token: str = ""
     shopify_api_version: str = "2024-01"
 
-    # Google Workspace (OAuth)
+    # Google Workspace (OAuth) - for user login
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
+    google_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/auth/google/callback
     user_google_email: str = ""  # Optional: for single-user mode
 
-    # Slack
+    # Slack - defaults for connector (can be overridden by tenant/user creds)
     slack_bot_token: str = ""  # Bot token (xoxb-) for channels
     slack_user_token: str = ""  # User token (xoxp-) for DMs - required for reading DMs
     slack_app_token: str = ""  # Optional: for Socket Mode
+    # Slack OAuth - for admin datasource connection
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/slack/callback
 
-    # GitHub
+    # GitHub - defaults for connector (can be overridden by tenant/user creds)
     github_token: str = ""  # Personal Access Token or GitHub App token
+    # GitHub OAuth - for admin datasource connection
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/github/callback
+
+    # Jira OAuth - for admin datasource connection
+    jira_client_id: str = ""
+    jira_client_secret: str = ""
+    jira_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/jira/callback
 
     # JWT Configuration
     jwt_secret_key: str = "insecure-jwt-secret-key-dev-only"
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 1440
+
+    @field_validator("jwt_secret_key", mode="after")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        """Ensure JWT secret is explicitly set in production."""
+        environment = os.getenv("ENVIRONMENT", "development").lower()
+        if environment == "production":
+            if not v or v == "insecure-jwt-secret-key-dev-only":
+                raise ValueError(
+                    "CRITICAL: JWT_SECRET_KEY must be explicitly set in production! "
+                    "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+                )
+            if len(v) < 32:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be at least 32 characters in production for security."
+                )
+        return v
 
     # Logging
     log_level: str = "INFO"

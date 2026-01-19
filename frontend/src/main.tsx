@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import './index.css'
 
+console.log('[Mosaic] Starting app...')
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -13,10 +15,22 @@ const queryClient = new QueryClient({
   },
 })
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
-  </React.StrictMode>,
-)
+try {
+  const rootElement = document.getElementById('root')
+  console.log('[Mosaic] Root element:', rootElement)
+
+  if (rootElement) {
+    ReactDOM.createRoot(rootElement).render(
+      <React.StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </React.StrictMode>,
+    )
+    console.log('[Mosaic] App rendered successfully')
+  } else {
+    console.error('[Mosaic] Root element not found!')
+  }
+} catch (error) {
+  console.error('[Mosaic] Error rendering app:', error)
+}

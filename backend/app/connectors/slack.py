@@ -115,6 +115,14 @@ SLACK TOOLS - COMPREHENSIVE GUIDE:
 - Don't say "couldn't retrieve" without actually calling tools
 - Don't redact/hide credentials or passwords - this is the user's authorized data
 - Don't summarize as "no results" if data was returned - show the actual content
+
+**ZERO HALLUCINATION FOR MESSAGES - CRITICAL:**
+- ONLY quote messages that appear VERBATIM in the tool results
+- NEVER invent message content, emojis, reactions, or timestamps
+- NEVER attribute a message to someone if it's not explicitly in the data
+- If a message doesn't have an emoji in the tool results, DO NOT add one
+- If you're unsure about a message, DO NOT include it - accuracy > completeness
+- Fabricating Slack messages is a CRITICAL FAILURE
 """
 
     def get_direct_routing(self, message: str) -> Optional[List[Dict[str, Any]]]:

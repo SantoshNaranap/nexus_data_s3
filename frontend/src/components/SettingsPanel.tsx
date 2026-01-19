@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { DataSource } from '../types'
-import { datasourceApi } from '../services/api'
+import { datasourceApi, API_BASE_URL } from '../services/api'
 import DataSourceIcon from './DataSourceIcon'
+import { useAuth } from '../contexts/AuthContext'
 
 interface SettingsPanelProps {
   datasources: DataSource[]
@@ -10,6 +11,15 @@ interface SettingsPanelProps {
   onSave: (datasource: string, credentials: Record<string, string>, testResult?: { success: boolean }) => void
   configuredDatasources: Set<string>
 }
+
+// OrgDataSource interface reserved for future org-level datasource management
+// interface OrgDataSource {
+//   datasource: string
+//   connected: boolean
+//   metadata?: Record<string, any>
+//   connected_by?: string
+//   connected_at?: string
+// }
 
 interface CredentialField {
   name: string
@@ -243,6 +253,9 @@ const credentialFields: Record<string, CredentialField[]> = {
 }
 
 
+// Datasources that support OAuth (no manual credentials needed)
+const OAUTH_DATASOURCES = ['slack', 'github', 'jira']
+
 export default function SettingsPanel({
   datasources,
   isOpen,
@@ -250,6 +263,7 @@ export default function SettingsPanel({
   onSave,
   configuredDatasources,
 }: SettingsPanelProps) {
+  const { user: _user } = useAuth() // Reserved for future user-specific settings
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(
     datasources[0] || null
   )
@@ -257,6 +271,69 @@ export default function SettingsPanel({
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({})
+
+  // Per-user OAuth state
+  const [oauthAvailable, setOauthAvailable] = useState<Record<string, boolean>>({})
+  const [disconnecting, setDisconnecting] = useState<Record<string, boolean>>({})
+
+  // Fetch OAuth availability when panel opens
+  useEffect(() => {
+    if (isOpen) {
+      fetchOauthAvailability()
+    }
+  }, [isOpen])
+
+  const fetchOauthAvailability = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/credentials/oauth/available`, {
+        credentials: 'include',
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setOauthAvailable(data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch OAuth availability:', error)
+    }
+  }
+
+  const handleOAuthConnect = (datasource: string) => {
+    // Redirect to per-user OAuth flow
+    window.location.href = `${API_BASE_URL}/api/credentials/${datasource}/oauth`
+  }
+
+  const handleDisconnect = async (datasource: string) => {
+    if (!confirm(`Are you sure you want to disconnect ${datasource}? You'll need to reconnect via OAuth to use it again.`)) {
+      return
+    }
+
+    setDisconnecting((prev) => ({ ...prev, [datasource]: true }))
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/credentials/${datasource}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      })
+
+      if (response.ok) {
+        // Remove from configured datasources by triggering a refresh
+        // The parent component should refetch the status
+        window.location.reload()
+      } else {
+        const error = await response.json()
+        alert(`Failed to disconnect: ${error.detail || 'Unknown error'}`)
+      }
+    } catch (error) {
+      console.error('Failed to disconnect:', error)
+      alert('Failed to disconnect. Please try again.')
+    } finally {
+      setDisconnecting((prev) => ({ ...prev, [datasource]: false }))
+    }
+  }
+
+  const isOAuthDatasource = (datasourceId: string) => {
+    return OAUTH_DATASOURCES.includes(datasourceId.toLowerCase())
+  }
 
   if (!isOpen) return null
 
@@ -381,7 +458,7 @@ export default function SettingsPanel({
           <div className="p-6 border-b border-gray-200 dark:border-gray-700">
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Settings</h2>
             <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-              Configure your connectors
+              Connect your data sources
             </p>
           </div>
 
@@ -411,6 +488,9 @@ export default function SettingsPanel({
                     <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                   )}
                 </div>
+                {isOAuthDatasource(datasource.id) && (
+                  <span className="text-xs text-gray-500 dark:text-gray-400 ml-8">OAuth</span>
+                )}
               </button>
             ))}
           </div>
@@ -453,36 +533,123 @@ export default function SettingsPanel({
 
               <div className="flex-1 overflow-y-auto p-6">
                 <div className="space-y-4 max-w-2xl">
-                  {currentFields.map((field) => (
-                    <div key={field.name}>
-                      <label
-                        htmlFor={field.name}
-                        className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
-                      >
-                        {field.label}
-                        {field.required && <span className="text-red-500 ml-1">*</span>}
-                      </label>
-                      <input
-                        type={field.type}
-                        id={field.name}
-                        value={currentCredentials[field.name] || ''}
-                        onChange={(e) =>
-                          handleChange(selectedDatasource.id, field.name, e.target.value)
-                        }
-                        placeholder={field.placeholder}
-                        className={`w-full px-4 py-2 bg-gray-50 dark:bg-gray-900 border ${
-                          errors[`${selectedDatasource.id}_${field.name}`]
-                            ? 'border-red-500 dark:border-red-500'
-                            : 'border-gray-300 dark:border-gray-600'
-                        } rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white transition-colors`}
-                      />
-                      {errors[`${selectedDatasource.id}_${field.name}`] && (
-                        <p className="text-red-500 text-sm mt-1">
-                          {errors[`${selectedDatasource.id}_${field.name}`]}
-                        </p>
+                  {/* OAuth Datasources - Show connect button */}
+                  {isOAuthDatasource(selectedDatasource.id) ? (
+                    <div className="space-y-6">
+                      {isConfigured ? (
+                        <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-6">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                              <svg className="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <div>
+                                <p className="font-medium text-green-900 dark:text-green-200">
+                                  Your {selectedDatasource.name} account is connected
+                                </p>
+                                <p className="text-sm text-green-700 dark:text-green-300">
+                                  You can query your {selectedDatasource.name} data now
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleDisconnect(selectedDatasource.id)}
+                              disabled={disconnecting[selectedDatasource.id]}
+                              className="px-4 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {disconnecting[selectedDatasource.id] ? 'Disconnecting...' : 'Disconnect'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : oauthAvailable[selectedDatasource.id] ? (
+                        <div className="text-center py-8">
+                          <div className="mb-6">
+                            <DataSourceIcon datasourceId={selectedDatasource.id} size={64} />
+                          </div>
+                          <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
+                            Connect your {selectedDatasource.name} account
+                          </h4>
+                          <p className="text-gray-600 dark:text-gray-400 mb-6 max-w-md mx-auto">
+                            Click the button below to securely connect your {selectedDatasource.name} account using OAuth.
+                            You'll be redirected to {selectedDatasource.name} to authorize access to your data.
+                          </p>
+                          <button
+                            onClick={() => handleOAuthConnect(selectedDatasource.id)}
+                            className="inline-flex items-center px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+                          >
+                            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                            </svg>
+                            Connect with {selectedDatasource.name}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-6">
+                          <div className="flex items-start space-x-3">
+                            <svg className="w-6 h-6 text-amber-600 dark:text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                            <div>
+                              <p className="font-medium text-amber-900 dark:text-amber-200">
+                                OAuth not configured for {selectedDatasource.name}
+                              </p>
+                              <p className="text-sm text-amber-700 dark:text-amber-300 mt-1">
+                                Please contact your administrator to set up {selectedDatasource.name} OAuth integration.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
                       )}
+
+                      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+                        <div className="flex items-start space-x-3">
+                          <svg className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <div className="text-sm text-blue-900 dark:text-blue-200">
+                            <p className="font-medium mb-1">About OAuth Connection</p>
+                            <ul className="list-disc list-inside space-y-1 text-blue-800 dark:text-blue-300">
+                              <li>Your credentials are never stored - we use secure OAuth tokens</li>
+                              <li>You'll see only your own data based on your permissions</li>
+                              <li>You can disconnect anytime from your {selectedDatasource.name} settings</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  ))}
+                  ) : (
+                    /* Non-OAuth Datasources - Show manual credential fields */
+                    <>
+                      {currentFields.map((field) => (
+                        <div key={field.name}>
+                          <label
+                            htmlFor={field.name}
+                            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+                          >
+                            {field.label}
+                            {field.required && <span className="text-red-500 ml-1">*</span>}
+                          </label>
+                          <input
+                            type={field.type}
+                            id={field.name}
+                            value={currentCredentials[field.name] || ''}
+                            onChange={(e) =>
+                              handleChange(selectedDatasource.id, field.name, e.target.value)
+                            }
+                            placeholder={field.placeholder}
+                            className={`w-full px-4 py-2 bg-gray-50 dark:bg-gray-900 border ${
+                              errors[`${selectedDatasource.id}_${field.name}`]
+                                ? 'border-red-500 dark:border-red-500'
+                                : 'border-gray-300 dark:border-gray-600'
+                            } rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white transition-colors`}
+                          />
+                          {errors[`${selectedDatasource.id}_${field.name}`] && (
+                            <p className="text-red-500 text-sm mt-1">
+                              {errors[`${selectedDatasource.id}_${field.name}`]}
+                            </p>
+                          )}
+                        </div>
+                      ))}
 
                   {/* Test Result */}
                   {testResult && (
@@ -539,8 +706,8 @@ export default function SettingsPanel({
                     </div>
                   )}
 
-                  {/* Credential Instructions */}
-                  {credentialInstructions[selectedDatasource.id] && (
+                  {/* Credential Instructions - only for non-OAuth */}
+                  {credentialInstructions[selectedDatasource.id] && !isOAuthDatasource(selectedDatasource.id) && (
                     <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mt-6">
                       <div className="flex items-start space-x-3">
                         <svg
@@ -568,44 +735,12 @@ export default function SettingsPanel({
                     </div>
                   )}
 
-                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
-                    <div className="flex items-start space-x-3">
-                      <svg
-                        className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                        />
-                      </svg>
-                      <div className="text-sm text-blue-900 dark:text-blue-200">
-                        <p className="font-medium mb-1">Secure Storage</p>
-                        <p>
-                          Your credentials are encrypted and stored securely in the database.
-                          They persist across sessions and you only need to enter them once per datasource.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-6 border-t border-gray-200 dark:border-gray-700">
-                <div className="flex justify-end">
-                  <button
-                    onClick={() => handleSave(selectedDatasource.id)}
-                    disabled={isTesting}
-                    className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-sm hover:shadow-md flex items-center space-x-2"
-                  >
-                    {isTesting ? (
-                      <>
+                  {/* Secure Storage info - only for non-OAuth */}
+                  {!isOAuthDatasource(selectedDatasource.id) && (
+                    <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
+                      <div className="flex items-start space-x-3">
                         <svg
-                          className="w-5 h-5 animate-spin"
+                          className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -614,7 +749,46 @@ export default function SettingsPanel({
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             strokeWidth={2}
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                          />
+                        </svg>
+                        <div className="text-sm text-blue-900 dark:text-blue-200">
+                          <p className="font-medium mb-1">Secure Storage</p>
+                          <p>
+                            Your credentials are encrypted and stored securely in the database.
+                            They persist across sessions and you only need to enter them once per datasource.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Footer with Save button - only for non-OAuth datasources */}
+              {!isOAuthDatasource(selectedDatasource.id) && (
+                <div className="p-6 border-t border-gray-200 dark:border-gray-700">
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => handleSave(selectedDatasource.id)}
+                      disabled={isTesting}
+                      className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-sm hover:shadow-md flex items-center space-x-2"
+                    >
+                      {isTesting ? (
+                        <>
+                          <svg
+                            className="w-5 h-5 animate-spin"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
                           />
                         </svg>
                         <span>Testing Connection...</span>
@@ -625,6 +799,7 @@ export default function SettingsPanel({
                   </button>
                 </div>
               </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">

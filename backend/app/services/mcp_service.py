@@ -6,6 +6,7 @@ import time
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Any, List
 import logging
 from contextlib import asynccontextmanager
@@ -102,6 +103,213 @@ class MCPService:
         """Get list of available data sources from registry."""
         return registry_get_available_datasources()
 
+    def _is_auth_error(self, result_content: List[Any]) -> bool:
+        """Check if the result contains an authentication error (e.g., expired token)."""
+        if not result_content:
+            return False
+
+        for content in result_content:
+            if hasattr(content, 'text'):
+                text = content.text
+                # Check for structured JSON error response from connector
+                if 'AUTH_ERROR_401' in text or '"requires_reauth": true' in text:
+                    return True
+                # Check for common error patterns
+                if self._is_auth_error_message(text):
+                    return True
+        return False
+
+    def _is_auth_error_message(self, text: str) -> bool:
+        """Check if a text message indicates an auth error."""
+        text_lower = text.lower()
+        auth_error_patterns = [
+            '401',
+            'unauthorized',
+            'authentication failed',
+            'token expired',
+            'invalid token',
+            'access denied',
+            'jira error: 401',
+            'failure_client_auth',
+            'http 401',
+            'auth_error_401',
+            'requires_reauth',
+        ]
+        return any(pattern in text_lower for pattern in auth_error_patterns)
+
+    def _is_auth_error_exception(self, exc: Exception) -> bool:
+        """Check if an exception (including nested ones) indicates an auth error."""
+        # Check the main exception message
+        if self._is_auth_error_message(str(exc)):
+            return True
+
+        # Check for ExceptionGroup/TaskGroup with nested exceptions
+        if hasattr(exc, 'exceptions'):
+            for nested_exc in exc.exceptions:
+                if self._is_auth_error_message(str(nested_exc)):
+                    return True
+                # Recursively check nested groups
+                if self._is_auth_error_exception(nested_exc):
+                    return True
+
+        # Check the __cause__ chain
+        if exc.__cause__ and self._is_auth_error_message(str(exc.__cause__)):
+            return True
+
+        return False
+
+    async def _try_refresh_oauth_token(
+        self,
+        datasource: str,
+        user_id: str,
+        db: any,
+    ) -> bool:
+        """
+        Try to refresh OAuth token for a datasource.
+
+        Returns True if token was successfully refreshed.
+        """
+        from app.services.user_oauth_service import user_oauth_service
+
+        try:
+            # Get current credentials
+            current_creds = await credential_service.get_credentials(
+                datasource=datasource,
+                db=db,
+                user_id=user_id,
+            )
+
+            if not current_creds:
+                logger.warning(f"No credentials found for {datasource} to refresh")
+                return False
+
+            # Check if this is an OAuth credential with refresh token
+            if current_creds.get("oauth_type") != "user":
+                logger.info(f"Credentials for {datasource} are not OAuth, skipping refresh")
+                return False
+
+            # Refresh based on datasource
+            if datasource.lower() == "jira":
+                refreshed_creds = await user_oauth_service.refresh_jira_credentials(current_creds)
+            else:
+                logger.warning(f"Token refresh not implemented for {datasource}")
+                return False
+
+            if not refreshed_creds:
+                logger.warning(f"Failed to refresh token for {datasource}")
+                return False
+
+            # Save the refreshed credentials
+            await credential_service.save_credentials(
+                datasource=datasource,
+                credentials=refreshed_creds,
+                db=db,
+                user_id=user_id,
+            )
+
+            logger.info(f"Successfully refreshed and saved new token for {datasource}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error refreshing OAuth token for {datasource}: {e}")
+            return False
+
+    async def _check_and_refresh_token_if_expiring(
+        self,
+        datasource: str,
+        user_id: str,
+        db: any,
+        minutes_threshold: int = 5,
+    ) -> bool:
+        """
+        PROACTIVE token refresh - check if token is about to expire and refresh BEFORE it does.
+
+        This provides a smoother UX by avoiding the error-then-retry pattern.
+
+        Args:
+            datasource: The datasource to check
+            user_id: The user's ID
+            db: Database session
+            minutes_threshold: Refresh if token expires within this many minutes (default 5)
+
+        Returns:
+            True if token was refreshed, False otherwise (including if no refresh needed)
+        """
+        try:
+            # Only check OAuth-required datasources
+            if datasource.lower() not in self.OAUTH_REQUIRED_DATASOURCES:
+                return False
+
+            # Get current credentials
+            current_creds = await credential_service.get_credentials(
+                datasource=datasource,
+                db=db,
+                user_id=user_id,
+            )
+
+            if not current_creds:
+                return False
+
+            # Check if this is an OAuth credential
+            if current_creds.get("oauth_type") != "user":
+                return False
+
+            # Check for expires_at field
+            expires_at_str = current_creds.get("expires_at")
+            if not expires_at_str:
+                logger.debug(f"No expires_at field for {datasource}, skipping proactive refresh")
+                return False
+
+            # Parse expiry time
+            try:
+                # Handle both formats: with and without timezone
+                if expires_at_str.endswith('Z'):
+                    expires_at_str = expires_at_str[:-1] + '+00:00'
+                expires_at = datetime.fromisoformat(expires_at_str)
+
+                # Ensure timezone-aware
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Could not parse expires_at '{expires_at_str}': {e}")
+                return False
+
+            # Calculate time until expiry
+            now = datetime.now(timezone.utc)
+            time_until_expiry = expires_at - now
+            minutes_until_expiry = time_until_expiry.total_seconds() / 60
+
+            # Check if token is expiring soon
+            if minutes_until_expiry > minutes_threshold:
+                logger.debug(
+                    f"{datasource} token valid for {minutes_until_expiry:.1f} more minutes, no refresh needed"
+                )
+                return False
+
+            # Token is expiring soon - proactively refresh
+            if minutes_until_expiry > 0:
+                logger.info(
+                    f"🔄 PROACTIVE REFRESH: {datasource} token expires in {minutes_until_expiry:.1f} minutes, refreshing now..."
+                )
+            else:
+                logger.warning(
+                    f"⚠️ {datasource} token already expired {abs(minutes_until_expiry):.1f} minutes ago, attempting refresh..."
+                )
+
+            # Attempt refresh
+            refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
+
+            if refreshed:
+                logger.info(f"✅ Proactive token refresh successful for {datasource}")
+            else:
+                logger.warning(f"❌ Proactive token refresh failed for {datasource}")
+
+            return refreshed
+
+        except Exception as e:
+            logger.error(f"Error in proactive token check for {datasource}: {e}")
+            return False
+
     async def get_cached_tools(self, datasource: str) -> List[dict]:
         """
         Get tools for a datasource with caching (thread-safe).
@@ -178,6 +386,9 @@ class MCPService:
         elapsed = time.time() - start
         logger.info(f"🔥 Pre-warming completed in {elapsed:.2f}s")
 
+    # Datasources that require per-user OAuth (no fallback to default credentials)
+    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira"}
+
     async def _get_connector_env(
         self,
         datasource: str,
@@ -191,17 +402,20 @@ class MCPService:
 
         Uses the connector registry to map credential fields to env vars.
         Prioritizes user_id credentials over session_id credentials.
+
+        For OAuth-required datasources (slack, github, jira), user must have
+        connected their own account - no fallback to default credentials.
         """
         # Get connector from registry
         connector = get_connector(datasource)
         if not connector:
             raise ValueError(f"Unknown data source: {datasource}")
 
-        # Start with defaults from settings
-        env = connector.get_default_env_from_settings(settings)
+        # Check if this datasource requires OAuth (no fallback to defaults)
+        is_oauth_required = datasource.lower() in self.OAUTH_REQUIRED_DATASOURCES
 
-        # Add additional env from connector
-        env.update(connector.additional_env)
+        # Debug logging
+        logger.info(f"_get_connector_env: datasource={datasource}, user_id={user_id[:8] if user_id else None}..., session_id={session_id[:8] if session_id else None}..., db={db is not None}")
 
         # Prioritize user_id over session_id
         if user_id:
@@ -210,19 +424,37 @@ class MCPService:
                 db=db,
                 user_id=user_id,
             )
+            logger.info(f"_get_connector_env: user_id path, got credentials: {user_credentials is not None}")
         elif session_id:
             user_credentials = await credential_service.get_credentials(
                 datasource=datasource,
                 session_id=session_id,
             )
+            logger.info(f"_get_connector_env: session_id path, got credentials: {user_credentials is not None}")
         else:
             user_credentials = None
+            logger.info(f"_get_connector_env: no user_id or session_id, credentials=None")
+
+        # For OAuth-required datasources, user MUST have their own credentials
+        if is_oauth_required:
+            if not user_credentials:
+                raise ValueError(
+                    f"{datasource} requires you to connect your account via OAuth. "
+                    f"Please go to Settings and click 'Connect with {datasource}'."
+                )
+            # Only use user credentials (no defaults)
+            env = connector.get_env_from_credentials(user_credentials)
+            env.update(connector.additional_env)
+            logger.info(f"Using OAuth credentials for {datasource}")
+            return env
+
+        # For non-OAuth datasources, start with defaults and override with user creds
+        env = connector.get_default_env_from_settings(settings)
+        env.update(connector.additional_env)
 
         if user_credentials:
-            # Use connector's method to convert credentials to env vars
             user_env = connector.get_env_from_credentials(user_credentials)
             env.update(user_env)
-
             credential_type = "user" if user_id else "session"
             logger.info(f"Using {credential_type} credentials for {datasource}")
 
@@ -468,6 +700,11 @@ class MCPService:
         """
         start_time = time.time()
 
+        # PROACTIVE TOKEN REFRESH - check if token is about to expire BEFORE making request
+        # This avoids the error-then-retry pattern and provides smoother UX
+        if user_id and db:
+            await self._check_and_refresh_token_if_expiring(datasource, user_id, db)
+
         # CHECK CACHE FIRST (instant return if cached)
         # Get cacheable tools from connector registry
         cacheable_tools = get_cacheable_tools(datasource)
@@ -484,17 +721,60 @@ class MCPService:
                 logger.info(f"Force refresh requested for {datasource}/{tool_name}")
 
         # Use standard connection (MCP stdio doesn't support reuse well across tasks)
-        async with self.get_client(datasource, user_id, session_id, db=db) as session:
-            result = await session.call_tool(tool_name, arguments)
-            result_content = result.content if result else []
-            elapsed = time.time() - start_time
-            logger.info(f"⚡ FAST call_tool ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
+        try:
+            async with self.get_client(datasource, user_id, session_id, db=db) as session:
+                result = await session.call_tool(tool_name, arguments)
+                result_content = result.content if result else []
+                elapsed = time.time() - start_time
+                logger.info(f"⚡ FAST call_tool ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
 
-            # Store in cache for future requests
-            if cache_key:
-                await self._store_result_cache(cache_key, result_content)
+                # Check for OAuth token expiration and retry with refreshed token
+                if user_id and db and self._is_auth_error(result_content):
+                    logger.warning(f"Detected auth error in result for {datasource}, attempting token refresh...")
+                    refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
+                    if refreshed:
+                        # Retry the call with refreshed credentials
+                        logger.info(f"Retrying {datasource}/{tool_name} with refreshed token...")
+                        async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
+                            result = await retry_session.call_tool(tool_name, arguments)
+                            result_content = result.content if result else []
+                            logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh")
 
-            return result_content
+                # Store in cache for future requests
+                if cache_key:
+                    await self._store_result_cache(cache_key, result_content)
+
+                return result_content
+
+        except Exception as e:
+            # Check if exception is an auth error (e.g., 401, token expired)
+            # Use _is_auth_error_exception to handle TaskGroup/ExceptionGroup with nested exceptions
+            if user_id and db and self._is_auth_error_exception(e):
+                logger.warning(f"Detected auth error exception for {datasource}: {str(e)[:100]}...")
+                logger.info(f"Attempting token refresh for {datasource}...")
+                refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
+                if refreshed:
+                    # Retry the call with refreshed credentials
+                    logger.info(f"Retrying {datasource}/{tool_name} with refreshed token after exception...")
+                    try:
+                        async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
+                            result = await retry_session.call_tool(tool_name, arguments)
+                            result_content = result.content if result else []
+                            elapsed = time.time() - start_time
+                            logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh in {elapsed*1000:.0f}ms")
+
+                            # Store in cache for future requests
+                            if cache_key:
+                                await self._store_result_cache(cache_key, result_content)
+
+                            return result_content
+                    except Exception as retry_error:
+                        logger.error(f"Retry after token refresh also failed: {retry_error}")
+                        raise retry_error
+                else:
+                    logger.error(f"Token refresh failed for {datasource}, re-raising original error")
+            # Re-raise the original exception if not an auth error or refresh failed
+            raise
 
     # ==================== Schema Caching for MySQL ====================
 

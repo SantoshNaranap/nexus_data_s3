@@ -82,6 +82,9 @@ async def send_message_stream(
         # Get credential session ID from cookies (for anonymous users)
         credential_session_id = req.cookies.get("session_id")
 
+        # Debug logging
+        logger.info(f"Chat endpoint: user={user.email if user else None}, user_id={user.id[:8] if user else None}...")
+
         # Use user_id for credentials if authenticated
         if user:
             credential_session_id = user.id

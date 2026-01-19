@@ -48,6 +48,10 @@ export interface User {
   createdAt: string;
   lastLogin?: string;
   previousLogin?: string;
+  // Multi-tenant fields
+  role?: 'admin' | 'member';
+  tenant_id?: string;
+  auth_provider?: 'email' | 'google';
 }
 
 export interface DigestResult {

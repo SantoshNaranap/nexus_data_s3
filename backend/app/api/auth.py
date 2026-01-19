@@ -1,9 +1,9 @@
-"""Authentication endpoints for email/password auth and JWT."""
+"""Authentication endpoints for email/password auth, Google OAuth, and JWT."""
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,9 @@ from app.services.auth_service import auth_service
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+# In-memory store for OAuth state (in production, use Redis or database)
+oauth_states: dict = {}
 
 
 # ============ Request/Response Models ============
@@ -215,7 +218,146 @@ async def auth_status(
                 "email": current_user.email,
                 "name": current_user.name,
                 "profile_picture": current_user.profile_picture,
+                "role": current_user.role,
+                "tenant_id": current_user.tenant_id,
             },
         }
     else:
         return {"authenticated": False}
+
+
+# ============ Google OAuth Endpoints ============
+
+
+@router.get("/google")
+async def google_login():
+    """
+    Redirect to Google OAuth consent screen.
+
+    Initiates the OAuth flow by redirecting the user to Google's authorization page.
+    """
+    if not settings.google_oauth_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth is not configured",
+        )
+
+    # Generate state for CSRF protection
+    state = auth_service.generate_oauth_state()
+    oauth_states[state] = True  # Store state for validation
+
+    # Get authorization URL
+    auth_url = auth_service.get_google_auth_url(state)
+
+    logger.info("Redirecting user to Google OAuth")
+    return RedirectResponse(url=auth_url)
+
+
+@router.get("/google/callback")
+async def google_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Handle Google OAuth callback.
+
+    Exchanges the authorization code for tokens, gets user info,
+    creates/updates user, and redirects to frontend with auth cookie.
+    """
+    # Handle OAuth errors
+    if error:
+        logger.error(f"Google OAuth error: {error}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/login?error=oauth_error&message={error}"
+        )
+
+    # Validate required parameters
+    if not code or not state:
+        logger.error("Missing code or state in Google OAuth callback")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/login?error=missing_params"
+        )
+
+    # Validate state (CSRF protection)
+    if state not in oauth_states:
+        logger.error("Invalid OAuth state - possible CSRF attack")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/login?error=invalid_state"
+        )
+
+    # Remove used state
+    del oauth_states[state]
+
+    try:
+        # Exchange code for tokens
+        token_response = await auth_service.exchange_google_code(code)
+        access_token = token_response.get("access_token")
+
+        if not access_token:
+            raise ValueError("No access token in response")
+
+        # Get user info from Google
+        user_info = await auth_service.get_google_user_info(access_token)
+
+        google_id = user_info.get("id")
+        email = user_info.get("email")
+        name = user_info.get("name")
+        picture = user_info.get("picture")
+
+        if not google_id or not email:
+            raise ValueError("Missing required user info from Google")
+
+        # Handle OAuth login/signup with tenant assignment
+        user = await auth_service.handle_google_oauth(
+            db=db,
+            google_id=google_id,
+            email=email,
+            name=name,
+            profile_picture=picture,
+        )
+
+        # Update login timestamps
+        await auth_service.update_last_login(db, user)
+
+        # Create JWT access token
+        jwt_token = auth_service.create_access_token(
+            data={"user_id": user.id, "email": user.email}
+        )
+
+        security_logger.log_auth_success(user.email, "google_oauth")
+        logger.info(f"Google OAuth successful for: {email}")
+
+        # Create redirect response with cookie
+        response = RedirectResponse(url=settings.frontend_url)
+
+        # Set JWT in HTTPOnly cookie
+        cookie_settings = settings.cookie_settings
+        response.set_cookie(
+            key="access_token",
+            value=jwt_token,
+            httponly=cookie_settings["httponly"],
+            secure=cookie_settings["secure"],
+            samesite=cookie_settings["samesite"],
+            max_age=settings.jwt_access_token_expire_minutes * 60,
+        )
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Google OAuth callback error: {e}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/login?error=oauth_failed&message={str(e)}"
+        )
+
+
+@router.get("/google/available")
+async def google_oauth_available():
+    """Check if Google OAuth is configured and available."""
+    return {
+        "available": bool(
+            settings.google_oauth_client_id and settings.google_oauth_client_secret
+        )
+    }
