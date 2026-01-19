@@ -152,7 +152,10 @@ class Settings(BaseSettings):
     log_format: str = "development"  # "development" for readable, "json" for structured
 
     # Encryption - will be auto-generated in development if not set
+    # Primary encryption key (v2 - current)
     encryption_key: str = ""
+    # Legacy encryption key (v1 - for decryption during rotation)
+    encryption_key_v1: str = ""
 
     # Frontend URL - IMPORTANT: Configure this in production!
     frontend_url: str = "http://localhost:5173"
@@ -165,6 +168,19 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_requests_per_minute: int = 60
     rate_limit_requests_per_hour: int = 1000
+    rate_limit_backend: str = "memory"  # "memory" or "redis"
+
+    # Trusted proxies for X-Forwarded-For header validation
+    # Comma-separated list of IP addresses or CIDR ranges
+    # Only trust X-Forwarded-For from these addresses
+    trusted_proxies: str = ""  # e.g., "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+    @property
+    def trusted_proxy_list(self) -> list:
+        """Parse trusted proxies from comma-separated string."""
+        if not self.trusted_proxies:
+            return []
+        return [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
 
     # Application version (for health checks)
     version: str = "1.0.0"

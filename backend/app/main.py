@@ -31,6 +31,19 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting ConnectorMCP backend...", extra={"version": settings.version, "environment": settings.environment})
 
+    # Configure OpenTelemetry if OTLP endpoint is configured
+    try:
+        from app.core.telemetry import configure_telemetry
+        import os
+        if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            configure_telemetry(
+                service_name="connectormcp",
+                enable_console_export=not settings.is_production,
+            )
+            logger.info("OpenTelemetry configured")
+    except Exception as e:
+        logger.debug(f"OpenTelemetry not configured: {e}")
+
     # Initialize cache service
     try:
         cache = init_cache_service(use_redis=False)  # Use Redis in production: use_redis=settings.is_production

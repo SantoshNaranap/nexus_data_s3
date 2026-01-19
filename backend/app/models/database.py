@@ -169,3 +169,54 @@ class UserCredential(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class OAuthState(Base):
+    """OAuth state storage for CSRF protection in multi-instance deployments."""
+
+    __tablename__ = "oauth_states"
+
+    state = Column(String(64), primary_key=True)  # The random state token
+    context = Column(JSON, nullable=True)  # User ID, tenant ID, datasource, etc.
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)  # For cleanup
+
+    def to_dict(self):
+        """Convert OAuth state to dictionary."""
+        return {
+            "state": self.state,
+            "context": self.context,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+        }
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if the state has expired."""
+        return datetime.now() > self.expires_at
+
+
+class AnonymousSession(Base):
+    """Anonymous session storage for distributed deployments."""
+
+    __tablename__ = "anonymous_sessions"
+
+    session_id = Column(String(64), primary_key=True)
+    encrypted_credentials = Column(Text, nullable=False)  # JSON dict of datasource -> encrypted creds
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)  # 24 hour TTL
+
+    def to_dict(self):
+        """Convert anonymous session to dictionary."""
+        return {
+            "session_id": self.session_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+        }
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if the session has expired."""
+        return datetime.now() > self.expires_at

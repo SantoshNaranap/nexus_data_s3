@@ -26,7 +26,15 @@ class CredentialService:
 
     For authenticated users: Stores credentials in database with encryption.
     For anonymous users: Stores credentials in-memory per session (backward compatibility).
+
+    Supports encryption key rotation:
+    - New credentials are encrypted with the current key (v2 format: "v2:<ciphertext>")
+    - Legacy credentials (no prefix or v1 prefix) are decrypted with appropriate key
+    - Credentials are re-encrypted with current key on read (transparent migration)
     """
+
+    # Current encryption version
+    CURRENT_VERSION = "v2"
 
     def __init__(self):
         # In-memory storage for anonymous users (session-based)
@@ -39,20 +47,61 @@ class CredentialService:
         # Lock for thread-safe access to in-memory credentials
         self._lock = asyncio.Lock()
 
-        # Encryption key from settings (guaranteed to be valid by config validator)
+        # Current encryption key (v2) from settings
         encryption_key = settings.encryption_key
         self.cipher = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
 
+        # Legacy encryption key (v1) for decryption during rotation
+        self.cipher_v1 = None
+        if settings.encryption_key_v1:
+            legacy_key = settings.encryption_key_v1
+            self.cipher_v1 = Fernet(legacy_key.encode() if isinstance(legacy_key, str) else legacy_key)
+
     def _encrypt_credentials(self, credentials: Dict[str, str]) -> str:
-        """Encrypt credentials using Fernet."""
+        """
+        Encrypt credentials using current Fernet key with version prefix.
+
+        Format: "v2:<base64_ciphertext>"
+        """
         credentials_json = json.dumps(credentials)
         encrypted = self.cipher.encrypt(credentials_json.encode())
-        return encrypted.decode()
+        return f"{self.CURRENT_VERSION}:{encrypted.decode()}"
 
     def _decrypt_credentials(self, encrypted_data: str) -> Dict[str, str]:
-        """Decrypt credentials using Fernet."""
-        decrypted = self.cipher.decrypt(encrypted_data.encode())
-        return json.loads(decrypted.decode())
+        """
+        Decrypt credentials, handling both versioned and legacy formats.
+
+        Supports:
+        - "v2:<ciphertext>" - Current format, uses current key
+        - "v1:<ciphertext>" - Legacy versioned format, uses v1 key
+        - "<ciphertext>" - Legacy unversioned format, tries current then v1
+        """
+        # Check for versioned format
+        if encrypted_data.startswith("v2:"):
+            ciphertext = encrypted_data[3:]
+            decrypted = self.cipher.decrypt(ciphertext.encode())
+            return json.loads(decrypted.decode())
+
+        if encrypted_data.startswith("v1:"):
+            if not self.cipher_v1:
+                raise ValueError("v1 credentials found but ENCRYPTION_KEY_V1 not configured")
+            ciphertext = encrypted_data[3:]
+            decrypted = self.cipher_v1.decrypt(ciphertext.encode())
+            return json.loads(decrypted.decode())
+
+        # Legacy unversioned format - try current key first, then v1
+        try:
+            decrypted = self.cipher.decrypt(encrypted_data.encode())
+            return json.loads(decrypted.decode())
+        except Exception:
+            if self.cipher_v1:
+                decrypted = self.cipher_v1.decrypt(encrypted_data.encode())
+                return json.loads(decrypted.decode())
+            raise
+
+    def _needs_reencryption(self, encrypted_data: str) -> bool:
+        """Check if encrypted data needs to be re-encrypted with current key."""
+        return not encrypted_data.startswith(f"{self.CURRENT_VERSION}:")
 
     # ============ Multi-tenant methods (Database storage) ============
 

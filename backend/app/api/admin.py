@@ -14,13 +14,11 @@ from app.middleware.auth import get_current_user
 from app.models.database import User
 from app.services.tenant_service import tenant_service
 from app.services.tenant_datasource_service import tenant_datasource_service
+from app.services.oauth_state_service import oauth_state_service
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
-
-# In-memory store for OAuth states (in production, use Redis or database)
-oauth_states: dict = {}
 
 
 # ============ Request/Response Models ============
@@ -199,6 +197,7 @@ async def disconnect_datasource(
 @router.get("/datasources/slack/connect")
 async def slack_connect(
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Start Slack OAuth flow (admin only)."""
     require_admin(current_user)
@@ -210,13 +209,13 @@ async def slack_connect(
             detail="Slack OAuth is not configured",
         )
 
-    # Generate state with user/tenant context
-    state = tenant_datasource_service.generate_oauth_state()
-    oauth_states[state] = {
+    # Generate state with user/tenant context and store in database
+    context = {
         "user_id": current_user.id,
         "tenant_id": current_user.tenant_id,
         "datasource": "slack",
     }
+    state = await oauth_state_service.create_and_store_state(db, context)
 
     auth_url = tenant_datasource_service.get_slack_auth_url(state)
     logger.info(f"Admin {current_user.email} starting Slack OAuth")
@@ -242,14 +241,20 @@ async def slack_callback(
             url=f"{settings.frontend_url}/settings?error=missing_params"
         )
 
-    if state not in oauth_states:
+    # Validate and consume state (database-backed for multi-instance)
+    state_data = await oauth_state_service.validate_and_consume_state(db, state)
+    if state_data is None:
         return RedirectResponse(
             url=f"{settings.frontend_url}/settings?error=invalid_state"
         )
 
-    state_data = oauth_states.pop(state)
-    tenant_id = state_data["tenant_id"]
-    user_id = state_data["user_id"]
+    tenant_id = state_data.get("tenant_id")
+    user_id = state_data.get("user_id")
+    if not tenant_id or not user_id:
+        logger.error("Missing tenant_id or user_id in Slack OAuth state")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/settings?error=invalid_state"
+        )
 
     try:
         # Exchange code for tokens
@@ -301,6 +306,7 @@ async def slack_callback(
 @router.get("/datasources/github/connect")
 async def github_connect(
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Start GitHub OAuth flow (admin only)."""
     require_admin(current_user)
@@ -312,12 +318,13 @@ async def github_connect(
             detail="GitHub OAuth is not configured",
         )
 
-    state = tenant_datasource_service.generate_oauth_state()
-    oauth_states[state] = {
+    # Generate state with user/tenant context and store in database
+    context = {
         "user_id": current_user.id,
         "tenant_id": current_user.tenant_id,
         "datasource": "github",
     }
+    state = await oauth_state_service.create_and_store_state(db, context)
 
     auth_url = tenant_datasource_service.get_github_auth_url(state)
     logger.info(f"Admin {current_user.email} starting GitHub OAuth")
@@ -343,14 +350,20 @@ async def github_callback(
             url=f"{settings.frontend_url}/settings?error=missing_params"
         )
 
-    if state not in oauth_states:
+    # Validate and consume state (database-backed for multi-instance)
+    state_data = await oauth_state_service.validate_and_consume_state(db, state)
+    if state_data is None:
         return RedirectResponse(
             url=f"{settings.frontend_url}/settings?error=invalid_state"
         )
 
-    state_data = oauth_states.pop(state)
-    tenant_id = state_data["tenant_id"]
-    user_id = state_data["user_id"]
+    tenant_id = state_data.get("tenant_id")
+    user_id = state_data.get("user_id")
+    if not tenant_id or not user_id:
+        logger.error("Missing tenant_id or user_id in GitHub OAuth state")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/settings?error=invalid_state"
+        )
 
     try:
         # Exchange code for tokens
@@ -402,6 +415,7 @@ async def github_callback(
 @router.get("/datasources/jira/connect")
 async def jira_connect(
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Start Jira OAuth flow (admin only)."""
     require_admin(current_user)
@@ -413,12 +427,13 @@ async def jira_connect(
             detail="Jira OAuth is not configured",
         )
 
-    state = tenant_datasource_service.generate_oauth_state()
-    oauth_states[state] = {
+    # Generate state with user/tenant context and store in database
+    context = {
         "user_id": current_user.id,
         "tenant_id": current_user.tenant_id,
         "datasource": "jira",
     }
+    state = await oauth_state_service.create_and_store_state(db, context)
 
     auth_url = tenant_datasource_service.get_jira_auth_url(state)
     logger.info(f"Admin {current_user.email} starting Jira OAuth")
@@ -444,14 +459,20 @@ async def jira_callback(
             url=f"{settings.frontend_url}/settings?error=missing_params"
         )
 
-    if state not in oauth_states:
+    # Validate and consume state (database-backed for multi-instance)
+    state_data = await oauth_state_service.validate_and_consume_state(db, state)
+    if state_data is None:
         return RedirectResponse(
             url=f"{settings.frontend_url}/settings?error=invalid_state"
         )
 
-    state_data = oauth_states.pop(state)
-    tenant_id = state_data["tenant_id"]
-    user_id = state_data["user_id"]
+    tenant_id = state_data.get("tenant_id")
+    user_id = state_data.get("user_id")
+    if not tenant_id or not user_id:
+        logger.error("Missing tenant_id or user_id in Jira OAuth state")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/settings?error=invalid_state"
+        )
 
     try:
         # Exchange code for tokens

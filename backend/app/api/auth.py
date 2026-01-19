@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,13 +13,11 @@ from app.core.logging import get_logger, security_logger
 from app.middleware.auth import get_current_user, get_current_user_optional
 from app.models.database import User
 from app.services.auth_service import auth_service
+from app.services.oauth_state_service import oauth_state_service
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
-
-# In-memory store for OAuth state (in production, use Redis or database)
-oauth_states: dict = {}
 
 
 # ============ Request/Response Models ============
@@ -230,7 +228,7 @@ async def auth_status(
 
 
 @router.get("/google")
-async def google_login():
+async def google_login(db: AsyncSession = Depends(get_db)):
     """
     Redirect to Google OAuth consent screen.
 
@@ -242,9 +240,8 @@ async def google_login():
             detail="Google OAuth is not configured",
         )
 
-    # Generate state for CSRF protection
-    state = auth_service.generate_oauth_state()
-    oauth_states[state] = True  # Store state for validation
+    # Generate state for CSRF protection and store in database
+    state = await oauth_state_service.create_and_store_state(db)
 
     # Get authorization URL
     auth_url = auth_service.get_google_auth_url(state)
@@ -255,7 +252,6 @@ async def google_login():
 
 @router.get("/google/callback")
 async def google_callback(
-    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -281,15 +277,13 @@ async def google_callback(
             url=f"{settings.frontend_url}/login?error=missing_params"
         )
 
-    # Validate state (CSRF protection)
-    if state not in oauth_states:
-        logger.error("Invalid OAuth state - possible CSRF attack")
+    # Validate and consume state (CSRF protection) - database-backed for multi-instance
+    state_context = await oauth_state_service.validate_and_consume_state(db, state)
+    if state_context is None:
+        logger.error("Invalid OAuth state - possible CSRF attack or expired")
         return RedirectResponse(
             url=f"{settings.frontend_url}/login?error=invalid_state"
         )
-
-    # Remove used state
-    del oauth_states[state]
 
     try:
         # Exchange code for tokens

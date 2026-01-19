@@ -5,20 +5,57 @@ Provides request rate limiting using sliding window algorithm
 to protect against abuse and ensure fair resource usage.
 """
 
+import ipaddress
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.core.config import settings
 from app.core.exceptions import RateLimitError
 from app.core.logging import get_logger, security_logger
 
 logger = get_logger(__name__)
+
+
+def _parse_trusted_proxies(proxies: List[str]) -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse trusted proxy list into network objects for efficient matching."""
+    networks = []
+    for proxy in proxies:
+        try:
+            # Handle both single IPs and CIDR ranges
+            if "/" in proxy:
+                networks.append(ipaddress.ip_network(proxy, strict=False))
+            else:
+                # Single IP - convert to /32 or /128 network
+                ip = ipaddress.ip_address(proxy)
+                if isinstance(ip, ipaddress.IPv4Address):
+                    networks.append(ipaddress.ip_network(f"{proxy}/32"))
+                else:
+                    networks.append(ipaddress.ip_network(f"{proxy}/128"))
+        except ValueError as e:
+            logger.warning(f"Invalid trusted proxy address '{proxy}': {e}")
+    return networks
+
+
+def _is_trusted_proxy(client_ip: str, trusted_networks: List) -> bool:
+    """Check if client IP is in the trusted proxy list."""
+    if not trusted_networks:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+        return any(ip in network for network in trusted_networks)
+    except ValueError:
+        return False
+
+
+# Parse trusted proxies at module load
+TRUSTED_PROXY_NETWORKS = _parse_trusted_proxies(settings.trusted_proxy_list)
 
 
 @dataclass
@@ -33,9 +70,98 @@ class RateLimitConfig:
     excluded_paths: list = field(default_factory=lambda: ["/health", "/api/health"])
 
 
-class SlidingWindowCounter:
+class RateLimitBackend:
+    """Abstract base for rate limit backends."""
+
+    def is_allowed(self, key: str) -> Tuple[bool, int, int]:
+        """Check if request is allowed. Returns (allowed, remaining, retry_after)."""
+        raise NotImplementedError
+
+    def record_request(self, key: str) -> None:
+        """Record a request for the given key."""
+        raise NotImplementedError
+
+
+class RedisRateLimiter(RateLimitBackend):
     """
-    Sliding window rate limiter implementation.
+    Redis-backed rate limiter for distributed deployments.
+
+    Uses Redis INCR + EXPIRE for atomic, distributed rate limiting.
+    Supports both minute and hour windows.
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        requests_per_minute: int = 60,
+        requests_per_hour: int = 1000,
+    ):
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_hour = requests_per_hour
+        self.redis_url = redis_url
+        self._redis = None
+
+    async def _get_redis(self):
+        """Lazy initialization of Redis connection."""
+        if self._redis is None:
+            try:
+                import redis.asyncio as aioredis
+                self._redis = await aioredis.from_url(
+                    self.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                )
+                logger.info("Redis rate limiter connected")
+            except Exception as e:
+                logger.error(f"Failed to connect to Redis for rate limiting: {e}")
+                raise
+        return self._redis
+
+    async def is_allowed_async(self, key: str) -> Tuple[bool, int, int]:
+        """
+        Check if request is allowed using Redis.
+
+        Returns (allowed, remaining, retry_after_seconds)
+        """
+        try:
+            redis = await self._get_redis()
+            now = int(time.time())
+
+            # Minute window
+            minute_key = f"ratelimit:minute:{key}:{now // 60}"
+            minute_count = await redis.incr(minute_key)
+            if minute_count == 1:
+                await redis.expire(minute_key, 60)
+
+            if minute_count > self.requests_per_minute:
+                retry_after = 60 - (now % 60)
+                return False, 0, retry_after
+
+            # Hour window
+            hour_key = f"ratelimit:hour:{key}:{now // 3600}"
+            hour_count = await redis.incr(hour_key)
+            if hour_count == 1:
+                await redis.expire(hour_key, 3600)
+
+            if hour_count > self.requests_per_hour:
+                retry_after = 3600 - (now % 3600)
+                return False, 0, retry_after
+
+            remaining = min(
+                self.requests_per_minute - minute_count,
+                self.requests_per_hour - hour_count,
+            )
+            return True, max(0, remaining), 0
+
+        except Exception as e:
+            logger.error(f"Redis rate limit check failed: {e}, allowing request")
+            # Fail open - allow request if Redis is down
+            return True, self.requests_per_minute, 0
+
+
+class SlidingWindowCounter(RateLimitBackend):
+    """
+    Sliding window rate limiter implementation (in-memory).
 
     More accurate than fixed window counters and prevents
     burst attacks at window boundaries.
@@ -160,17 +286,31 @@ class RateLimiter:
         Extract rate limit key from request.
 
         Uses user_id if authenticated, otherwise falls back to IP.
+        Only trusts X-Forwarded-For from configured trusted proxies.
         """
         # Try to get user_id from request state (set by auth middleware)
         if hasattr(request.state, "user") and request.state.user:
             return f"user:{request.state.user.id}"
 
-        # Fall back to IP address
+        # Get direct client IP
+        direct_ip = request.client.host if request.client else "unknown"
+
+        # Only trust X-Forwarded-For from trusted proxies
         forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
+        if forwarded and _is_trusted_proxy(direct_ip, TRUSTED_PROXY_NETWORKS):
+            # Request is from a trusted proxy - use the first IP in X-Forwarded-For
+            # which should be the original client IP
             ip = forwarded.split(",")[0].strip()
+            logger.debug(f"Using X-Forwarded-For IP {ip} from trusted proxy {direct_ip}")
         else:
-            ip = request.client.host if request.client else "unknown"
+            # Not from trusted proxy - use direct connection IP
+            # This prevents IP spoofing via X-Forwarded-For
+            if forwarded and not TRUSTED_PROXY_NETWORKS:
+                # No trusted proxies configured - log a warning in production
+                logger.debug(f"Ignoring X-Forwarded-For (no trusted proxies configured), using direct IP {direct_ip}")
+            elif forwarded:
+                logger.warning(f"Ignoring X-Forwarded-For from untrusted IP {direct_ip}")
+            ip = direct_ip
 
         return f"ip:{ip}"
 

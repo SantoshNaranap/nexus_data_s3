@@ -61,6 +61,9 @@ def _evict_oldest_from_cache(cache: Dict[str, Dict[str, Any]], max_size: int) ->
 # Connection idle timeout for persistent sessions
 CONNECTION_IDLE_TIMEOUT = 300  # 5 minutes - close idle connections to free resources
 
+# MCP tool call timeout - prevents indefinite hangs on unresponsive connectors
+MCP_TOOL_CALL_TIMEOUT = 30.0  # 30 seconds
+
 
 class MCPService:
     """Service for managing MCP connector clients."""
@@ -620,7 +623,10 @@ class MCPService:
             # Fallback to standard connection with circuit breaker protection
             try:
                 async with self.get_client(datasource, user_id, session_id, db=db) as session:
-                    result = await session.call_tool(tool_name, arguments)
+                    result = await asyncio.wait_for(
+                        session.call_tool(tool_name, arguments),
+                        timeout=MCP_TOOL_CALL_TIMEOUT
+                    )
                     await breaker.record_success()
                     return result.content if result else []
             except (asyncio.TimeoutError, ConnectionError, OSError) as fallback_error:
@@ -723,7 +729,10 @@ class MCPService:
         # Use standard connection (MCP stdio doesn't support reuse well across tasks)
         try:
             async with self.get_client(datasource, user_id, session_id, db=db) as session:
-                result = await session.call_tool(tool_name, arguments)
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, arguments),
+                    timeout=MCP_TOOL_CALL_TIMEOUT
+                )
                 result_content = result.content if result else []
                 elapsed = time.time() - start_time
                 logger.info(f"⚡ FAST call_tool ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
@@ -736,7 +745,10 @@ class MCPService:
                         # Retry the call with refreshed credentials
                         logger.info(f"Retrying {datasource}/{tool_name} with refreshed token...")
                         async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
-                            result = await retry_session.call_tool(tool_name, arguments)
+                            result = await asyncio.wait_for(
+                                retry_session.call_tool(tool_name, arguments),
+                                timeout=MCP_TOOL_CALL_TIMEOUT
+                            )
                             result_content = result.content if result else []
                             logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh")
 
@@ -758,7 +770,10 @@ class MCPService:
                     logger.info(f"Retrying {datasource}/{tool_name} with refreshed token after exception...")
                     try:
                         async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
-                            result = await retry_session.call_tool(tool_name, arguments)
+                            result = await asyncio.wait_for(
+                                retry_session.call_tool(tool_name, arguments),
+                                timeout=MCP_TOOL_CALL_TIMEOUT
+                            )
                             result_content = result.content if result else []
                             elapsed = time.time() - start_time
                             logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh in {elapsed*1000:.0f}ms")

@@ -1,16 +1,16 @@
 """Credentials API endpoints with per-user OAuth support."""
 
 import logging
-import secrets
 from typing import Dict, Optional
-from fastapi import APIRouter, HTTPException, Response, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.credential_service import credential_service
 from app.services.user_oauth_service import user_oauth_service
-from app.middleware.auth import get_current_user_optional as get_current_user, get_current_user as require_user
+from app.services.oauth_state_service import oauth_state_service
+from app.middleware.auth import get_current_user_optional, get_current_user
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.database import User
@@ -18,9 +18,6 @@ from app.models.database import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
-
-# In-memory store for OAuth states (in production, use Redis)
-oauth_states: dict = {}
 
 
 class CredentialsSaveRequest(BaseModel):
@@ -39,48 +36,23 @@ class CredentialsResponse(BaseModel):
 @router.post("", response_model=CredentialsResponse)
 async def save_credentials(
     request: CredentialsSaveRequest,
-    response: Response,
-    req: Request,
-    user: Optional[User] = Depends(get_current_user),
+    user: User = Depends(get_current_user),  # Require authentication
     db: AsyncSession = Depends(get_db),
 ):
     """
     Save credentials for a datasource.
 
-    For authenticated users: Credentials are stored in AWS Secrets Manager.
-    For anonymous users: Credentials are stored in-memory per session.
+    Requires authentication - credentials are stored encrypted in the database.
     """
     try:
-        if user:
-            # Authenticated user - save to database
-            await credential_service.save_credentials(
-                datasource=request.datasource,
-                credentials=request.credentials,
-                db=db,
-                user_id=user.id,
-            )
-            logger.info(f"Credentials saved for user {user.id[:8]}... datasource: {request.datasource}")
-        else:
-            # Anonymous user - use session-based storage
-            session_id = req.cookies.get("session_id")
-            if not session_id:
-                # Generate new session ID
-                import secrets
-                session_id = secrets.token_urlsafe(32)
-                response.set_cookie(
-                    key="session_id",
-                    value=session_id,
-                    httponly=True,
-                    samesite="lax",
-                    max_age=86400,  # 24 hours
-                )
-
-            await credential_service.save_credentials(
-                datasource=request.datasource,
-                credentials=request.credentials,
-                session_id=session_id,
-            )
-            logger.info(f"Credentials saved for session {session_id[:8]}... datasource: {request.datasource}")
+        # Authenticated user - save to database
+        await credential_service.save_credentials(
+            datasource=request.datasource,
+            credentials=request.credentials,
+            db=db,
+            user_id=user.id,
+        )
+        logger.info(f"Credentials saved for user {user.id[:8]}... datasource: {request.datasource}")
 
         return CredentialsResponse(
             success=True,
@@ -100,7 +72,7 @@ async def save_credentials(
 async def get_credentials_status(
     datasource: str,
     req: Request,
-    user: Optional[User] = Depends(get_current_user),
+    user: Optional[User] = Depends(get_current_user_optional),  # Allow both auth and anon
     db: AsyncSession = Depends(get_db),
 ):
     """Check if credentials are configured for a datasource."""
@@ -136,34 +108,17 @@ async def get_credentials_status(
 @router.delete("/{datasource}")
 async def delete_credentials(
     datasource: str,
-    req: Request,
-    user: Optional[User] = Depends(get_current_user),
+    user: User = Depends(get_current_user),  # Require authentication
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete credentials for a datasource."""
+    """Delete credentials for a datasource. Requires authentication."""
     try:
-        if user:
-            # Delete for authenticated user
-            await credential_service.delete_credentials(
-                datasource=datasource,
-                db=db,
-                user_id=user.id,
-            )
-            logger.info(f"Credentials deleted for user {user.id[:8]}... datasource: {datasource}")
-        else:
-            # Delete for anonymous user
-            session_id = req.cookies.get("session_id")
-            if not session_id:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No session found",
-                )
-
-            await credential_service.delete_credentials(
-                datasource=datasource,
-                session_id=session_id,
-            )
-            logger.info(f"Credentials deleted for session {session_id[:8]}... datasource: {datasource}")
+        await credential_service.delete_credentials(
+            datasource=datasource,
+            db=db,
+            user_id=user.id,
+        )
+        logger.info(f"Credentials deleted for user {user.id[:8]}... datasource: {datasource}")
 
         return {
             "success": True,
@@ -194,7 +149,8 @@ async def get_oauth_availability():
 @router.get("/{datasource}/oauth")
 async def start_oauth(
     datasource: str,
-    user: User = Depends(require_user),
+    user: User = Depends(get_current_user),  # Require authentication for OAuth
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Start OAuth flow for a datasource.
@@ -216,12 +172,12 @@ async def start_oauth(
             detail=f"OAuth is not configured for {datasource}. Please contact your administrator.",
         )
 
-    # Generate state with user context
-    state = user_oauth_service.generate_state()
-    oauth_states[state] = {
+    # Generate state with user context and store in database
+    context = {
         "user_id": user.id,
         "datasource": datasource_lower,
     }
+    state = await oauth_state_service.create_and_store_state(db, context)
 
     # Get authorization URL
     auth_url = user_oauth_service.get_auth_url(datasource_lower, state, user.id)
@@ -260,15 +216,20 @@ async def oauth_callback(
             url=f"{settings.frontend_url}?oauth_error={datasource}&message=missing_params"
         )
 
-    # Validate state
-    if state not in oauth_states:
-        logger.error(f"Invalid OAuth state for {datasource}")
+    # Validate and consume state (database-backed for multi-instance)
+    state_data = await oauth_state_service.validate_and_consume_state(db, state)
+    if state_data is None:
+        logger.error(f"Invalid OAuth state for {datasource} - possible CSRF attack or expired")
         return RedirectResponse(
             url=f"{settings.frontend_url}?oauth_error={datasource}&message=invalid_state"
         )
 
-    state_data = oauth_states.pop(state)
-    user_id = state_data["user_id"]
+    user_id = state_data.get("user_id")
+    if not user_id:
+        logger.error(f"Missing user_id in OAuth state for {datasource}")
+        return RedirectResponse(
+            url=f"{settings.frontend_url}?oauth_error={datasource}&message=invalid_state"
+        )
 
     try:
         # Exchange code for tokens
