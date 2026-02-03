@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import axios from 'axios';
-import type { DataSource, ChatRequest, ChatResponse, AgentStep, User, SourceReference } from '../types';
+import type { DataSource, ChatRequest, ChatResponse, AgentStep, User, SourceReference, ErrorInvestigation, ErrorInvestigationRequest, RemediationResponse } from '../types';
 
 // Centralized API base URL - single source of truth
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -26,9 +26,15 @@ export const datasourceApi = {
   },
 };
 
+export interface CredentialStatus {
+  configured: boolean;
+  status: 'connected' | 'expired' | 'disconnected';
+  expires_at?: string;
+}
+
 export const credentialsApi = {
-  checkStatus: async (datasource: string): Promise<{ configured: boolean }> => {
-    const response = await api.get(`/api/credentials/${datasource}/status`);
+  checkStatus: async (datasource: string): Promise<CredentialStatus> => {
+    const response = await api.get<CredentialStatus>(`/api/credentials/${datasource}/status`);
     return response.data;
   },
 
@@ -64,7 +70,8 @@ export const chatApi = {
     onThinkingEnd?: () => void,
     abortSignal?: AbortSignal
   ): Promise<void> => {
-    const response = await fetch(`${API_BASE_URL}/api/chat/message/stream`, {
+    // Use relative URL to go through Vite proxy (avoids cross-origin issues with streaming)
+    const response = await fetch('/api/chat/message/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -258,6 +265,48 @@ export const digestApi = {
 
   getLastLogin: async (): Promise<LastLoginInfo> => {
     const response = await api.get<LastLoginInfo>('/api/digest/last-login');
+    return response.data;
+  },
+};
+
+// Diagnostics API for error investigation
+export const diagnosticsApi = {
+  /**
+   * Investigate an error and return diagnosis findings
+   */
+  investigate: async (request: ErrorInvestigationRequest): Promise<ErrorInvestigation> => {
+    const response = await api.post<ErrorInvestigation>('/api/diagnostics/investigate', request, {
+      timeout: 15000, // 15 second timeout for investigation
+    });
+    return response.data;
+  },
+
+  /**
+   * Attempt to automatically fix a datasource issue
+   */
+  remediate: async (datasource: string, sessionId?: string): Promise<RemediationResponse> => {
+    const response = await api.post<RemediationResponse>('/api/diagnostics/remediate', {
+      datasource,
+      session_id: sessionId,
+    }, {
+      timeout: 35000, // 35 second timeout for remediation (includes connection test)
+    });
+    return response.data;
+  },
+
+  /**
+   * Get all circuit breaker statuses
+   */
+  getCircuitBreakers: async (): Promise<Record<string, unknown>> => {
+    const response = await api.get('/api/diagnostics/circuit-breakers');
+    return response.data;
+  },
+
+  /**
+   * Reset a circuit breaker for a specific datasource
+   */
+  resetCircuitBreaker: async (datasource: string): Promise<{ message: string }> => {
+    const response = await api.post<{ message: string }>(`/api/diagnostics/circuit-breakers/${datasource}/reset`);
     return response.data;
   },
 };
