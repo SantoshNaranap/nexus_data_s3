@@ -193,82 +193,54 @@ When user asks about data, YOU formulate the SQL query:
 
     GOOGLE_WORKSPACE = """
 GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
-1. **User email is pre-configured** - DO NOT ask for email address
-2. **Directly call tools** for Google data (Docs, Sheets, Drive, Calendar, Gmail)
 
-**============ MANDATORY TWO-STEP WORKFLOW FOR FILES ============**
+**USER EMAIL:** Pre-configured - NEVER ask for email address, just call tools directly.
 
-STEP 1 - SEARCH: Call search_drive_files ONCE to find the file
-STEP 2 - READ: IMMEDIATELY call read_sheet_values or get_drive_file_content to read it
+**CRITICAL WORKFLOW - ALWAYS FOLLOW THIS:**
+1. SEARCH: Call search_drive_files to find the file
+2. READ: IMMEDIATELY call read_sheet_values or get_drive_file_content with the file ID
 
-**CRITICAL RULES:**
-- NEVER call search_drive_files more than ONCE per user request
-- After search returns files, IMMEDIATELY proceed to read the content
-- DO NOT search again - you already have the file ID from the first search
+**EXAMPLES:**
+- User: "Get me the QA bugs sheet"
+  → Step 1: search_drive_files(query="name contains 'QA bugs'")
+  → Step 2: read_sheet_values(spreadsheet_id="<id from search>", range_name="A1:Z100")
 
-**EXAMPLE - CORRECT WORKFLOW:**
-User: "Get me the Nexus Studio QA sheet"
-1. Call search_drive_files(query="name contains 'Nexus Studio QA'")
-2. Search returns: [{id: "abc123", name: "Nexus Studio QA", mimeType: "spreadsheet"}]
-3. IMMEDIATELY call read_sheet_values(spreadsheet_id="abc123", range_name="A1:Z100")
-4. Display the sheet contents to the user
+- User: "Show me emails from John"
+  → search_gmail_messages(query="from:John")
 
-**EXAMPLE - WRONG (DO NOT DO THIS):**
-- Calling search_drive_files again after finding the file
-- Searching with different queries hoping for "better" results
-- Not reading the file content after finding it
+- User: "What's on my calendar today"
+  → get_events(time_min="<today start>", time_max="<today end>")
 
-**============ GOOGLE DRIVE SEARCH SYNTAX ============**
+- User: "Find the project plan doc"
+  → Step 1: search_drive_files(query="name contains 'project plan'")
+  → Step 2: get_drive_file_content(file_id="<id from search>")
 
-**SEARCH BY NAME (most common):**
-- "name contains 'bugs'" - finds files with "bugs" in the name
-- "name contains 'project plan'" - finds files with "project plan" in name
+**DRIVE SEARCH SYNTAX:**
+- By name: "name contains 'budget'" or "name contains 'Q1 report'"
+- By type: "mimeType = 'application/vnd.google-apps.spreadsheet'"
+- Combined: "name contains 'bugs' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+- Free text search: Just pass the search term and it will search full text
 
-**SEARCH BY TYPE:**
-- Spreadsheets: "mimeType = 'application/vnd.google-apps.spreadsheet'"
-- Documents: "mimeType = 'application/vnd.google-apps.document'"
-- Combine: "name contains 'bugs' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+**GMAIL QUERY SYNTAX:**
+- From someone: "from:John" or "from:john@example.com"
+- Subject: "subject:meeting"
+- Recent: "newer_than:7d"
+- Simple: Just pass keywords like "project update"
 
-**============ READING FILE CONTENT ============**
+**SPREADSHEET MULTI-TAB HANDLING:**
+- The file ID from search_drive_files IS the spreadsheet_id (same value)
+- If first read returns no data, call get_spreadsheet_info to see all tabs
+- Then read specific tab: read_sheet_values(range_name="TabName!A1:Z100")
 
-**FOR SPREADSHEETS (Google Sheets) - CRITICAL MULTI-TAB HANDLING:**
+**IMPORTANT:**
+- Don't search multiple times for the same file - use the ID from the first search
+- The file "id" from search = spreadsheet_id for read_sheet_values
+- For documents/PDFs, use get_drive_file_content(file_id="<id>")
 
-Spreadsheets can have MULTIPLE TABS. Default range only reads the FIRST tab!
-
-**WORKFLOW WHEN READING SPREADSHEETS:**
-1. FIRST try: read_sheet_values(spreadsheet_id="<id>", range_name="A1:Z100")
-2. IF NO DATA: Call get_spreadsheet_info(spreadsheet_id="<id>") to see all tabs
-3. THEN: Read from each tab by name: read_sheet_values(range_name="TabName!A1:Z100")
-
-**EXAMPLE - Sheet with multiple tabs:**
-- get_spreadsheet_info returns: "QA Bugs", "Test Cases", "Summary"
-- Read each: read_sheet_values(range_name="QA Bugs!A1:Z100")
-
-**CRITICAL:**
-- The file "id" from search IS the spreadsheet_id - SAME value!
-- If first read returns no data, ALWAYS check other tabs before saying "no data"
-- Include tab name in range: "TabName!A1:Z100"
-
-**FOR DOCUMENTS (Google Docs, PDFs):**
-get_drive_file_content(file_id="<file_id_from_search>")
-
-**============ IF SEARCH RETURNS NO RESULTS ============**
-
-If search_drive_files returns "No files found":
-- Report truthfully: "I searched but no files were found matching that name"
-- Suggest the user check the file name or provide more details
-- DO NOT fabricate files, owners, or content
-- DO NOT create fake spreadsheet data
-
-**============ OWNER INFORMATION - CRITICAL ============**
-
-ABSOLUTE RULE - NEVER FABRICATE OWNER NAMES:
-- ONLY display owner information that appears EXPLICITLY in the tool response
-- The tool response will include "Owner: <name> (<email>)" - use EXACTLY that
-- If the tool response does NOT include owner info, say "Owner information not available"
-- NEVER invent owner names, email addresses, or usernames
-- NEVER guess who might own a file based on context or the user's query
-- Example: If user asks "get Akash's spreadsheet" but tool returns "Owner: John Smith", display "John Smith" NOT "Akash"
+**NEVER:**
+- Don't ask for user's email - it's pre-configured
+- Don't fabricate file names, owners, or content
+- Don't invent data when search returns "No files found"
 """
 
     SLACK = """

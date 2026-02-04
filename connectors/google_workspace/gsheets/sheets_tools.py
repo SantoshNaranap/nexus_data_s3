@@ -142,14 +142,56 @@ async def read_sheet_values(
     """
     logger.info(f"[read_sheet_values] Invoked. Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}, Range: {range_name}")
 
+    # Check if a specific sheet was requested (contains "!")
+    specific_sheet_requested = "!" in range_name
+
     result = await asyncio.to_thread(
-        service.spreadsheets()
-        .values()
-        .get(spreadsheetId=spreadsheet_id, range=range_name)
-        .execute
+        service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=range_name
+        ).execute
     )
 
     values = result.get("values", [])
+
+    # If no data and no specific sheet was requested, try ALL sheets
+    if not values and not specific_sheet_requested:
+        logger.info(f"[read_sheet_values] No data in default range, checking all sheets...")
+
+        # Get spreadsheet metadata to find all sheet names
+        spreadsheet = await asyncio.to_thread(
+            service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute
+        )
+        sheets = spreadsheet.get("sheets", [])
+        sheet_names = [s.get("properties", {}).get("title", "") for s in sheets]
+
+        logger.info(f"[read_sheet_values] Found sheets: {sheet_names}")
+
+        # Try each sheet until we find data
+        for sheet_name in sheet_names:
+            try:
+                sheet_range = f"'{sheet_name}'!A1:Z1000"
+                logger.info(f"[read_sheet_values] Trying sheet: {sheet_name}")
+
+                sheet_result = await asyncio.to_thread(
+                    service.spreadsheets().values().get(
+                        spreadsheetId=spreadsheet_id, range=sheet_range
+                    ).execute
+                )
+
+                sheet_values = sheet_result.get("values", [])
+                if sheet_values:
+                    logger.info(f"[read_sheet_values] Found {len(sheet_values)} rows in sheet '{sheet_name}'")
+                    values = sheet_values
+                    range_name = sheet_range  # Update for output message
+                    break
+            except Exception as e:
+                logger.warning(f"[read_sheet_values] Error reading sheet '{sheet_name}': {e}")
+                continue
+
+        if not values:
+            # List all sheets we checked so user knows we were thorough
+            return f"No data found in spreadsheet {spreadsheet_id}. Checked all {len(sheet_names)} sheets: {', '.join(sheet_names)}. The spreadsheet appears to be empty."
+
     if not values:
         return f"No data found in range '{range_name}' for {user_google_email}."
 
