@@ -85,3 +85,27 @@ export interface AgentStep {
     result?: string;
   };
 }
+
+export interface ErrorInvestigationRequest {
+  datasource: string;
+  error_message?: string;
+  session_id?: string;
+}
+
+export interface ErrorInvestigation {
+  datasource: string;
+  diagnosis: string;
+  suggested_actions: string[];
+  can_auto_fix: boolean;
+  severity: 'low' | 'medium' | 'high';
+}
+
+export interface RemediationResponse {
+  success: boolean;
+  message: string;
+  actions_taken: string[];
+  test_result?: {
+    connected: boolean;
+    error?: string;
+  };
+}
