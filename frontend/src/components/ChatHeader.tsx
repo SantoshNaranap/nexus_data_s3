@@ -3,7 +3,6 @@ import DataSourceIcon from './DataSourceIcon'
 
 interface ChatHeaderProps {
   datasource: DataSource
-  sessionId: string | null
   showAgentPanel: boolean
   hasMessages: boolean
   isStreaming: boolean
@@ -14,7 +13,6 @@ interface ChatHeaderProps {
 
 export default function ChatHeader({
   datasource,
-  sessionId,
   showAgentPanel,
   hasMessages,
   isStreaming,
@@ -35,11 +33,10 @@ export default function ChatHeader({
         <div className="flex items-center gap-3">
           <button
             onClick={onToggleAgentPanel}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
-              showAgentPanel
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${showAgentPanel
                 ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300'
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
-            }`}
+              }`}
             title={showAgentPanel ? 'Hide agent activity' : 'Show agent activity'}
           >
             Agent

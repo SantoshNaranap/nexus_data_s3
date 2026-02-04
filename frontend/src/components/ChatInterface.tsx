@@ -19,7 +19,6 @@ export default function ChatInterface({ datasource, isConfigured }: ChatInterfac
     messages,
     input,
     setInput,
-    sessionId,
     isStreaming,
     streamingMessage,
     agentSteps,
@@ -36,7 +35,6 @@ export default function ChatInterface({ datasource, isConfigured }: ChatInterfac
       <div className="flex-1 flex flex-col h-full overflow-hidden">
         <ChatHeader
           datasource={datasource}
-          sessionId={sessionId}
           showAgentPanel={showAgentPanel}
           hasMessages={messages.length > 0}
           isStreaming={isStreaming}
