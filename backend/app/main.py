@@ -17,7 +17,7 @@ from app.core.cache import init_cache_service, get_cache_service
 from app.core.metrics import get_metrics, MetricsMiddleware
 from app.core.exceptions import AppError
 from app.middleware.rate_limit import RateLimitMiddleware, RateLimitConfig
-from app.api import chat, datasources, credentials, auth, agent, health, digest
+from app.api import chat, datasources, credentials, auth, agent, health, digest, admin
 from app.services.mcp_service import mcp_service
 
 # Configure structured logging
@@ -32,6 +32,19 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting ConnectorMCP backend...", extra={"version": settings.version, "environment": settings.environment})
+
+    # Configure OpenTelemetry if OTLP endpoint is configured
+    try:
+        from app.core.telemetry import configure_telemetry
+        import os
+        if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            configure_telemetry(
+                service_name="connectormcp",
+                enable_console_export=not settings.is_production,
+            )
+            logger.info("OpenTelemetry configured")
+    except Exception as e:
+        logger.debug(f"OpenTelemetry not configured: {e}")
 
     # Initialize cache service
     try:
@@ -72,14 +85,14 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
-# Note: root_path is NOT set because ALB forwards /api/* requests with prefix intact
-# If your ALB strips the /api prefix, uncomment root_path="/api" below
+# root_path is only needed when behind ALB/ingress that strips /api prefix
+# For local development, don't set root_path as it causes routing issues
 app = FastAPI(
     title="ConnectorMCP API",
     description="Backend API for ConnectorMCP - Multi-source data connector with MCP",
     version=settings.version,
     lifespan=lifespan,
-    # root_path="/api",  # Only uncomment if ALB strips /api prefix before forwarding
+    root_path="/api" if settings.is_production else "",
 )
 
 
@@ -129,33 +142,84 @@ app.add_middleware(
 )
 
 
-# ============ Request Context Middleware ============
-
-
-@app.middleware("http")
-async def request_context_middleware(request: Request, call_next: Callable):
-    """Add request context for logging."""
-    # Set request context for structured logging
-    request_id = set_request_context()
-    request.state.request_id = request_id
-
-    try:
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-    finally:
-        clear_request_context()
-
-
 # ============ Include Routers ============
+# NOTE: Routers must be included BEFORE @app.middleware decorators
 
 app.include_router(health.router)  # Health check endpoints
 app.include_router(auth.router)
+app.include_router(admin.router)  # Admin org datasource management
 app.include_router(chat.router)
 app.include_router(datasources.router)
 app.include_router(credentials.router)
 app.include_router(agent.router)  # Multi-source agent orchestration
 app.include_router(digest.router)  # "What You Missed" digest feature
+
+
+# ============ Request Context Middleware ============
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next: Callable):
+    """
+    Add request context for logging and distributed tracing.
+
+    Features (Production-Ready):
+    - Generates unique request ID for every request
+    - Accepts client-provided X-Request-ID for distributed tracing
+    - Propagates request ID in response headers
+    - Includes request ID in all log messages automatically
+    - Thread-safe via contextvars
+    """
+    import time as req_time
+    start_time = req_time.perf_counter()
+
+    # Accept client-provided request ID for distributed tracing, or generate new one
+    client_request_id = request.headers.get("X-Request-ID")
+    request_id = set_request_context(request_id=client_request_id)
+    request.state.request_id = request_id
+
+    # Log request start (skip noisy health checks in production)
+    if not request.url.path.endswith("/health"):
+        logger.info(
+            f"Request started: {request.method} {request.url.path}",
+            extra={"method": request.method, "path": request.url.path},
+        )
+
+    try:
+        response = await call_next(request)
+
+        # Calculate request duration
+        duration_ms = (req_time.perf_counter() - start_time) * 1000
+
+        # Log request completion (skip health checks)
+        if not request.url.path.endswith("/health"):
+            logger.info(
+                f"Request completed: {request.method} {request.url.path} - {response.status_code}",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(duration_ms, 2),
+                },
+            )
+
+        # Always include request ID in response for client correlation
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        duration_ms = (req_time.perf_counter() - start_time) * 1000
+        logger.error(
+            f"Request failed: {request.method} {request.url.path}",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "duration_ms": round(duration_ms, 2),
+                "error": str(e),
+            },
+        )
+        raise
+    finally:
+        clear_request_context()
 
 
 # ============ Root Endpoint ============
@@ -170,6 +234,25 @@ async def root():
         "status": "running",
         "environment": settings.environment,
     }
+
+
+@app.get("/debug/routes")
+async def debug_routes():
+    """Debug endpoint to list all routes."""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'path'):
+            routes.append({
+                "path": route.path,
+                "methods": list(getattr(route, 'methods', set())),
+            })
+    return {"routes": routes}
+
+
+@app.post("/api/debug/test")
+async def debug_test():
+    """Debug POST endpoint."""
+    return {"debug": "test", "status": "ok"}
 
 
 if __name__ == "__main__":

@@ -154,7 +154,7 @@ function AppContent() {
         {selectedDatasource?.id === 'what_you_missed' ? (
           <WhatYouMissedDashboard />
         ) : selectedDatasource ? (
-          <ChatInterface datasource={selectedDatasource} />
+          <ChatInterface datasource={selectedDatasource} isConfigured={configuredDatasources.has(selectedDatasource.id)} />
         ) : (
           <div className="flex-1 flex items-center justify-center p-8 bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
             <div className="text-center max-w-3xl">

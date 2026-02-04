@@ -3,12 +3,15 @@
 JIRA MCP Server
 
 Provides MCP tools for interacting with JIRA issues and projects.
+Supports both Basic Auth (API token) and OAuth (Bearer token) authentication.
+
+PRODUCTION-READY: Uses lazy initialization to handle expired OAuth tokens gracefully.
 """
 
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 from jira import JIRA
 from jira.exceptions import JIRAError
@@ -21,20 +24,116 @@ from query_parser import JiraQueryParser
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-mcp-server")
 
-# Get JIRA URL and ensure it has a scheme
+# Get JIRA credentials from environment
 jira_url = os.getenv("JIRA_URL", "")
-if jira_url and not jira_url.startswith(("http://", "https://")):
-    jira_url = f"https://{jira_url}"
-    logger.info(f"Added https:// scheme to JIRA URL: {jira_url}")
+jira_email = os.getenv("JIRA_EMAIL", "")
+jira_api_token = os.getenv("JIRA_API_TOKEN", "")
+jira_cloud_id = os.getenv("JIRA_CLOUD_ID", "")
 
-# Initialize JIRA client
-jira_client = JIRA(
-    server=jira_url,
-    basic_auth=(os.getenv("JIRA_EMAIL"), os.getenv("JIRA_API_TOKEN")),
-)
+# Global client - lazily initialized
+_jira_client: Optional[JIRA] = None
+_query_parser: Optional[JiraQueryParser] = None
+_initialization_error: Optional[str] = None
 
-# Initialize query parser
-query_parser = JiraQueryParser(jira_client)
+
+def get_jira_client() -> JIRA:
+    """
+    Lazily initialize and return the JIRA client.
+
+    This allows the MCP server to start even if credentials are expired,
+    and returns a clear error message when authentication fails.
+    """
+    global _jira_client, _query_parser, _initialization_error
+
+    # Return cached client if available
+    if _jira_client is not None:
+        return _jira_client
+
+    # If we already tried and failed, raise the cached error
+    if _initialization_error is not None:
+        raise JIRAError(_initialization_error)
+
+    try:
+        if jira_cloud_id:
+            # OAuth mode - use Atlassian Cloud API with Bearer token
+            oauth_base_url = f"https://api.atlassian.com/ex/jira/{jira_cloud_id}"
+            logger.info(f"Initializing OAuth mode with Cloud ID: {jira_cloud_id[:8]}...")
+
+            _jira_client = JIRA(
+                server=oauth_base_url,
+                options={"headers": {"Authorization": f"Bearer {jira_api_token}"}},
+            )
+        else:
+            # Basic Auth mode - use instance URL with email + API token
+            url = jira_url
+            if url and not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+
+            logger.info(f"Initializing Basic Auth mode with JIRA URL: {url}")
+            _jira_client = JIRA(
+                server=url,
+                basic_auth=(jira_email, jira_api_token),
+            )
+
+        # Initialize query parser
+        _query_parser = JiraQueryParser(_jira_client)
+        logger.info("JIRA client initialized successfully")
+        return _jira_client
+
+    except JIRAError as e:
+        error_msg = str(e)
+        # Check for authentication errors
+        if "401" in error_msg or "Unauthorized" in error_msg or "FAILURE_CLIENT_AUTH" in error_msg:
+            _initialization_error = "AUTH_ERROR_401: Your Jira OAuth token has expired. Please reconnect your Jira account in Settings."
+            logger.error(f"Jira authentication failed (token likely expired): {error_msg[:200]}")
+        else:
+            _initialization_error = f"JIRA_ERROR: {error_msg}"
+            logger.error(f"Jira initialization failed: {error_msg[:200]}")
+        raise JIRAError(_initialization_error)
+    except Exception as e:
+        _initialization_error = f"JIRA_ERROR: Failed to connect to Jira - {str(e)}"
+        logger.error(f"Unexpected error initializing Jira: {e}")
+        raise JIRAError(_initialization_error)
+
+
+def get_query_parser() -> JiraQueryParser:
+    """Get the query parser, initializing the client if needed."""
+    global _query_parser
+    if _query_parser is None:
+        get_jira_client()  # This will initialize both
+    return _query_parser
+
+
+def handle_jira_error(e: Exception, operation: str) -> list[TextContent]:
+    """
+    Handle JIRA errors with user-friendly messages.
+    Returns structured error that the backend can detect for token refresh.
+    """
+    error_str = str(e)
+
+    # Check for authentication errors
+    if any(pattern in error_str for pattern in ['401', 'Unauthorized', 'AUTH_ERROR_401', 'FAILURE_CLIENT_AUTH']):
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "error": True,
+                "error_code": "AUTH_ERROR_401",
+                "message": "Your Jira OAuth token has expired. Please reconnect your Jira account in Settings.",
+                "requires_reauth": True,
+            })
+        )]
+
+    # Other JIRA errors
+    logger.error(f"JIRA error in {operation}: {error_str}")
+    return [TextContent(
+        type="text",
+        text=json.dumps({
+            "error": True,
+            "error_code": "JIRA_ERROR",
+            "message": f"Jira error: {error_str[:500]}",
+        })
+    )]
+
 
 # Create MCP server
 app = Server("jira-connector")
@@ -216,7 +315,7 @@ Always start with 'project = PROJECTKEY' if you know the project.""",
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
-    """Handle tool calls."""
+    """Handle tool calls with proper error handling."""
     try:
         if name == "query_jira":
             return await handle_query_jira(arguments)
@@ -237,11 +336,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except JIRAError as e:
-        logger.error(f"JIRA error in {name}: {str(e)}")
-        return [TextContent(type="text", text=f"JIRA Error: {str(e)}")]
+        return handle_jira_error(e, name)
     except Exception as e:
-        logger.error(f"Unexpected error in {name}: {str(e)}")
-        return [TextContent(type="text", text=f"Unexpected error: {str(e)}")]
+        return handle_jira_error(e, name)
 
 
 async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
@@ -255,8 +352,12 @@ async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments["query"]
     logger.info(f"Processing natural language query: {query}")
 
+    # Get client (lazy initialization)
+    client = get_jira_client()
+    parser = get_query_parser()
+
     # Parse the query
-    parsed = query_parser.parse(query)
+    parsed = parser.parse(query)
     logger.info(f"Parsed query: {json.dumps(parsed, indent=2)}")
 
     jql = parsed["jql"]
@@ -265,7 +366,7 @@ async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
 
     # Execute the JQL query
     max_results = 50 if not is_count else 100
-    issues = jira_client.search_issues(jql, maxResults=max_results, fields="key,summary,status,assignee")
+    issues = client.search_issues(jql, maxResults=max_results, fields="key,summary,status,assignee")
 
     # Format results
     results = []
@@ -305,11 +406,13 @@ async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
                  'NEVER call search_issues with empty parameters {}!'
         )]
 
+    client = get_jira_client()
+
     jql = arguments["jql"]
     max_results = arguments.get("max_results", 50)
     fields = arguments.get("fields", "key,summary,status,assignee")
 
-    issues = jira_client.search_issues(jql, maxResults=max_results, fields=fields)
+    issues = client.search_issues(jql, maxResults=max_results, fields=fields)
 
     results = []
     for issue in issues:
@@ -334,8 +437,10 @@ async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
     """Get detailed issue information."""
+    client = get_jira_client()
+
     issue_key = arguments["issue_key"]
-    issue = jira_client.issue(issue_key)
+    issue = client.issue(issue_key)
 
     result = {
         "key": issue.key,
@@ -359,6 +464,8 @@ async def handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
     """Create a new issue."""
+    client = get_jira_client()
+
     project = arguments["project"]
     summary = arguments["summary"]
     description = arguments["description"]
@@ -375,12 +482,12 @@ async def handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
     if priority:
         issue_dict["priority"] = {"name": priority}
 
-    new_issue = jira_client.create_issue(fields=issue_dict)
+    new_issue = client.create_issue(fields=issue_dict)
 
     result = {
         "key": new_issue.key,
         "summary": summary,
-        "url": f"{jira_client.server_url}/browse/{new_issue.key}",
+        "url": f"{client.server_url}/browse/{new_issue.key}",
         "status": "created",
     }
 
@@ -389,10 +496,12 @@ async def handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     """Update an existing issue."""
+    client = get_jira_client()
+
     issue_key = arguments["issue_key"]
     fields = arguments["fields"]
 
-    issue = jira_client.issue(issue_key)
+    issue = client.issue(issue_key)
     issue.update(fields=fields)
 
     result = {
@@ -406,7 +515,9 @@ async def handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_list_projects() -> list[TextContent]:
     """List all projects."""
-    projects = jira_client.projects()
+    client = get_jira_client()
+
+    projects = client.projects()
 
     results = [
         {
@@ -440,8 +551,10 @@ async def handle_get_project(arguments: dict[str, Any]) -> list[TextContent]:
                  'NEVER call get_project with empty parameters {}!'
         )]
 
+    client = get_jira_client()
+
     project_key = arguments["project_key"]
-    project = jira_client.project(project_key)
+    project = client.project(project_key)
 
     result = {
         "key": project.key,
@@ -456,10 +569,12 @@ async def handle_get_project(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     """Add a comment to an issue."""
+    client = get_jira_client()
+
     issue_key = arguments["issue_key"]
     comment_text = arguments["comment"]
 
-    comment = jira_client.add_comment(issue_key, comment_text)
+    comment = client.add_comment(issue_key, comment_text)
 
     result = {
         "issue_key": issue_key,

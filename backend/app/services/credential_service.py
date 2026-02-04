@@ -1,9 +1,9 @@
-"""Credential management service."""
+"""Credential management service with multi-tenant support."""
 
 import logging
 import json
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Credential source types for priority tracking
+CRED_SOURCE_USER = "user"       # User's personal credentials
+CRED_SOURCE_TENANT = "tenant"   # Organization-level credentials
+CRED_SOURCE_DEFAULT = "default" # Default env var credentials
+
 
 class CredentialService:
     """
@@ -21,7 +26,15 @@ class CredentialService:
 
     For authenticated users: Stores credentials in database with encryption.
     For anonymous users: Stores credentials in-memory per session (backward compatibility).
+
+    Supports encryption key rotation:
+    - New credentials are encrypted with the current key (v2 format: "v2:<ciphertext>")
+    - Legacy credentials (no prefix or v1 prefix) are decrypted with appropriate key
+    - Credentials are re-encrypted with current key on read (transparent migration)
     """
+
+    # Current encryption version
+    CURRENT_VERSION = "v2"
 
     def __init__(self):
         # In-memory storage for anonymous users (session-based)
@@ -34,20 +47,61 @@ class CredentialService:
         # Lock for thread-safe access to in-memory credentials
         self._lock = asyncio.Lock()
 
-        # Encryption key from settings (guaranteed to be valid by config validator)
+        # Current encryption key (v2) from settings
         encryption_key = settings.encryption_key
         self.cipher = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
 
+        # Legacy encryption key (v1) for decryption during rotation
+        self.cipher_v1 = None
+        if settings.encryption_key_v1:
+            legacy_key = settings.encryption_key_v1
+            self.cipher_v1 = Fernet(legacy_key.encode() if isinstance(legacy_key, str) else legacy_key)
+
     def _encrypt_credentials(self, credentials: Dict[str, str]) -> str:
-        """Encrypt credentials using Fernet."""
+        """
+        Encrypt credentials using current Fernet key with version prefix.
+
+        Format: "v2:<base64_ciphertext>"
+        """
         credentials_json = json.dumps(credentials)
         encrypted = self.cipher.encrypt(credentials_json.encode())
-        return encrypted.decode()
+        return f"{self.CURRENT_VERSION}:{encrypted.decode()}"
 
     def _decrypt_credentials(self, encrypted_data: str) -> Dict[str, str]:
-        """Decrypt credentials using Fernet."""
-        decrypted = self.cipher.decrypt(encrypted_data.encode())
-        return json.loads(decrypted.decode())
+        """
+        Decrypt credentials, handling both versioned and legacy formats.
+
+        Supports:
+        - "v2:<ciphertext>" - Current format, uses current key
+        - "v1:<ciphertext>" - Legacy versioned format, uses v1 key
+        - "<ciphertext>" - Legacy unversioned format, tries current then v1
+        """
+        # Check for versioned format
+        if encrypted_data.startswith("v2:"):
+            ciphertext = encrypted_data[3:]
+            decrypted = self.cipher.decrypt(ciphertext.encode())
+            return json.loads(decrypted.decode())
+
+        if encrypted_data.startswith("v1:"):
+            if not self.cipher_v1:
+                raise ValueError("v1 credentials found but ENCRYPTION_KEY_V1 not configured")
+            ciphertext = encrypted_data[3:]
+            decrypted = self.cipher_v1.decrypt(ciphertext.encode())
+            return json.loads(decrypted.decode())
+
+        # Legacy unversioned format - try current key first, then v1
+        try:
+            decrypted = self.cipher.decrypt(encrypted_data.encode())
+            return json.loads(decrypted.decode())
+        except Exception:
+            if self.cipher_v1:
+                decrypted = self.cipher_v1.decrypt(encrypted_data.encode())
+                return json.loads(decrypted.decode())
+            raise
+
+    def _needs_reencryption(self, encrypted_data: str) -> bool:
+        """Check if encrypted data needs to be re-encrypted with current key."""
+        return not encrypted_data.startswith(f"{self.CURRENT_VERSION}:")
 
     # ============ Multi-tenant methods (Database storage) ============
 
@@ -286,6 +340,175 @@ class CredentialService:
             self._credentials.pop(session_id, None)
             self._session_timestamps.pop(session_id, None)
             logger.info(f"Cleaned up expired session {session_id[:8]}...")
+
+    # ============ Multi-tenant credential resolution ============
+
+    async def get_effective_credentials(
+        self,
+        datasource: str,
+        db: AsyncSession,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, str]], str]:
+        """
+        Get effective credentials for a datasource with priority resolution.
+
+        Priority order:
+        1. User's personal credentials (if set) - HIGHEST
+        2. Tenant/org credentials (if connected)
+        3. Default env var credentials - LOWEST
+
+        Args:
+            datasource: The datasource type (slack, github, jira, etc.)
+            db: Database session
+            user_id: Optional user ID for authenticated users
+            session_id: Optional session ID for anonymous users
+
+        Returns:
+            Tuple of (credentials dict or None, source type)
+            Source type is one of: "user", "tenant", "default", or "" if none found
+        """
+        # 1. Try user's personal credentials first
+        if user_id:
+            user_creds = await self.get_credentials(
+                datasource=datasource,
+                db=db,
+                user_id=user_id,
+            )
+            if user_creds:
+                logger.info(f"Using user credentials for {datasource}")
+                return user_creds, CRED_SOURCE_USER
+
+        # For anonymous users, check session storage
+        if session_id and not user_id:
+            session_creds = await self.get_credentials(
+                datasource=datasource,
+                session_id=session_id,
+            )
+            if session_creds:
+                logger.info(f"Using session credentials for {datasource}")
+                return session_creds, CRED_SOURCE_USER
+
+        # 2. Try tenant/org credentials if user belongs to a tenant
+        if user_id and db:
+            try:
+                from app.models.database import User
+                from app.services.tenant_datasource_service import tenant_datasource_service
+
+                # Get user to find their tenant
+                result = await db.execute(
+                    select(User).where(User.id == user_id)
+                )
+                user = result.scalar_one_or_none()
+
+                if user and user.tenant_id:
+                    # Get tenant credentials
+                    tenant_creds = await tenant_datasource_service.get_decrypted_credentials(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        datasource=datasource,
+                    )
+                    if tenant_creds:
+                        logger.info(f"Using tenant credentials for {datasource}")
+                        return tenant_creds, CRED_SOURCE_TENANT
+
+            except Exception as e:
+                logger.warning(f"Error getting tenant credentials: {e}")
+
+        # 3. Return None - caller should fall back to env var defaults
+        logger.info(f"No stored credentials found for {datasource}, using defaults")
+        return None, CRED_SOURCE_DEFAULT
+
+    def get_default_credentials(self, datasource: str) -> Optional[Dict[str, str]]:
+        """
+        Get default credentials from environment variables.
+
+        This is a fallback when no user or tenant credentials are found.
+
+        Args:
+            datasource: The datasource type
+
+        Returns:
+            Credentials dict or None if not configured
+        """
+        datasource_lower = datasource.lower()
+
+        if datasource_lower == "slack":
+            if settings.slack_bot_token:
+                return {
+                    "bot_token": settings.slack_bot_token,
+                    "user_token": settings.slack_user_token,
+                    "app_token": settings.slack_app_token,
+                }
+        elif datasource_lower == "github":
+            if settings.github_token:
+                return {
+                    "access_token": settings.github_token,
+                }
+        elif datasource_lower == "jira":
+            if settings.jira_url and settings.jira_api_token:
+                return {
+                    "url": settings.jira_url,
+                    "email": settings.jira_email,
+                    "api_token": settings.jira_api_token,
+                }
+        elif datasource_lower == "mysql":
+            if settings.mysql_host:
+                return {
+                    "host": settings.mysql_host,
+                    "port": str(settings.mysql_port),
+                    "user": settings.mysql_user,
+                    "password": settings.mysql_password,
+                    "database": settings.mysql_database,
+                }
+        elif datasource_lower == "s3":
+            if settings.aws_access_key_id:
+                return {
+                    "aws_access_key_id": settings.aws_access_key_id,
+                    "aws_secret_access_key": settings.aws_secret_access_key,
+                    "aws_region": settings.aws_default_region,
+                }
+
+        return None
+
+    async def get_credentials_with_fallback(
+        self,
+        datasource: str,
+        db: AsyncSession,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, str]], str]:
+        """
+        Get credentials with automatic fallback to defaults.
+
+        Combines get_effective_credentials and get_default_credentials.
+
+        Args:
+            datasource: The datasource type
+            db: Database session
+            user_id: Optional user ID
+            session_id: Optional session ID
+
+        Returns:
+            Tuple of (credentials dict, source type)
+        """
+        # First try stored credentials (user -> tenant)
+        creds, source = await self.get_effective_credentials(
+            datasource=datasource,
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        if creds:
+            return creds, source
+
+        # Fall back to env var defaults
+        default_creds = self.get_default_credentials(datasource)
+        if default_creds:
+            return default_creds, CRED_SOURCE_DEFAULT
+
+        return None, ""
 
 
 # Global credential service instance

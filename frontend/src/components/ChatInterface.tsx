@@ -9,9 +9,10 @@ import AgentActivityPanel from './AgentActivityPanel'
 
 interface ChatInterfaceProps {
   datasource: DataSource
+  isConfigured: boolean
 }
 
-export default function ChatInterface({ datasource }: ChatInterfaceProps) {
+export default function ChatInterface({ datasource, isConfigured }: ChatInterfaceProps) {
   const [showAgentPanel, setShowAgentPanel] = useState(true)
 
   const {
@@ -39,6 +40,7 @@ export default function ChatInterface({ datasource }: ChatInterfaceProps) {
           showAgentPanel={showAgentPanel}
           hasMessages={messages.length > 0}
           isStreaming={isStreaming}
+          isConfigured={isConfigured}
           onToggleAgentPanel={() => setShowAgentPanel(!showAgentPanel)}
           onNewConversation={handleNewConversation}
         />

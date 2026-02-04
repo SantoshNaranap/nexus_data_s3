@@ -39,16 +39,23 @@ class JiraConnector(BaseConnector):
                 name="jira_email",
                 env_var="JIRA_EMAIL",
                 display_name="Email",
-                description="Your JIRA account email",
-                required=True,
+                description="Your JIRA account email (not needed for OAuth)",
+                required=False,  # Not required for OAuth
                 sensitive=False,
             ),
             CredentialField(
                 name="jira_api_token",
                 env_var="JIRA_API_TOKEN",
                 display_name="API Token",
-                description="JIRA API token from https://id.atlassian.com/manage-profile/security/api-tokens",
+                description="JIRA API token or OAuth access token",
                 required=True,
+            ),
+            CredentialField(
+                name="jira_cloud_id",
+                env_var="JIRA_CLOUD_ID",
+                display_name="Cloud ID",
+                description="Atlassian Cloud ID (auto-filled via OAuth)",
+                required=False,
             ),
         ]
 

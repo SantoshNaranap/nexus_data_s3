@@ -7,6 +7,7 @@ interface ChatHeaderProps {
   showAgentPanel: boolean
   hasMessages: boolean
   isStreaming: boolean
+  isConfigured: boolean
   onToggleAgentPanel: () => void
   onNewConversation: () => void
 }
@@ -17,6 +18,7 @@ export default function ChatHeader({
   showAgentPanel,
   hasMessages,
   isStreaming,
+  isConfigured,
   onToggleAgentPanel,
   onNewConversation,
 }: ChatHeaderProps) {
@@ -53,10 +55,15 @@ export default function ChatHeader({
               New Chat
             </button>
           )}
-          {sessionId && (
+          {isConfigured ? (
             <div className="flex items-center text-xs text-green-600 dark:text-green-400">
               <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
               Connected
+            </div>
+          ) : (
+            <div className="flex items-center text-xs text-amber-600 dark:text-amber-400">
+              <div className="w-2 h-2 bg-amber-500 rounded-full mr-2"></div>
+              Not Connected
             </div>
           )}
         </div>

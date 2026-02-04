@@ -314,6 +314,35 @@ class ApplicationMetrics:
             ["error_type", "datasource"],
         )
 
+        # MCP connection metrics
+        self.mcp_connection_duration = Histogram(
+            "mosaic_mcp_connection_duration_seconds",
+            "MCP connection establishment time in seconds",
+            ["datasource"],
+            buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, float("inf")),
+        )
+
+        # Credential operation metrics
+        self.credential_operations_total = Counter(
+            "mosaic_credential_operations_total",
+            "Total credential encrypt/decrypt operations",
+            ["operation", "datasource"],  # operation: encrypt, decrypt
+        )
+
+        # OAuth flow metrics
+        self.oauth_flows_total = Counter(
+            "mosaic_oauth_flows_total",
+            "Total OAuth flow completions",
+            ["provider", "status"],  # status: success, error
+        )
+
+        # Circuit breaker state gauge
+        self.circuit_breaker_state = Gauge(
+            "mosaic_circuit_breaker_state",
+            "Circuit breaker state per datasource (0=closed, 1=open, 2=half-open)",
+            ["datasource"],
+        )
+
     # ============ Convenience Methods ============
 
     def record_request(
@@ -387,6 +416,35 @@ class ApplicationMetrics:
         """Record an authentication attempt."""
         status = "success" if success else "failure"
         self.auth_attempts.inc(method=method, status=status)
+
+    def record_mcp_connection(self, datasource: str, duration: float) -> None:
+        """Record MCP connection establishment time."""
+        self.mcp_connection_duration.observe(duration, datasource=datasource)
+
+    def record_credential_operation(
+        self, operation: str, datasource: str = "unknown"
+    ) -> None:
+        """Record a credential encrypt/decrypt operation."""
+        self.credential_operations_total.inc(operation=operation, datasource=datasource)
+
+    def record_oauth_flow(self, provider: str, success: bool) -> None:
+        """Record an OAuth flow completion."""
+        status = "success" if success else "error"
+        self.oauth_flows_total.inc(provider=provider, status=status)
+
+    def set_circuit_breaker_state(
+        self, datasource: str, state: str
+    ) -> None:
+        """
+        Set circuit breaker state for a datasource.
+
+        Args:
+            datasource: The datasource name
+            state: One of "closed", "open", "half-open"
+        """
+        state_values = {"closed": 0, "open": 1, "half-open": 2}
+        value = state_values.get(state.lower(), 0)
+        self.circuit_breaker_state.set(value, datasource=datasource)
 
     # ============ Export Methods ============
 

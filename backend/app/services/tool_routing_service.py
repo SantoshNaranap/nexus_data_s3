@@ -72,8 +72,11 @@ class ToolRoutingService:
                 },
                 {
                     # All other JIRA queries go through natural language
+                    # Include common issue-related keywords
                     "keywords": ["working on", "assigned to", "issues in", "tasks in", "sprint", "backlog",
-                                "bugs in", "stories in", "tickets in"],
+                                "bugs in", "stories in", "tickets in", "open issue", "closed issue",
+                                "issue", "issues", "task", "tasks", "bug", "bugs", "story", "stories",
+                                "ticket", "tickets", "what is", "tell me", "show me", "oralia", "status"],
                     "tool": "query_jira",
                     "args": {},
                     "args_from_message": True,  # Use message as query

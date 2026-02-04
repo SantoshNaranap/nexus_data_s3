@@ -55,12 +55,19 @@ Your task is to:
 3. Resolve any conflicts or inconsistencies
 4. Generate a clear, unified response
 
-ACCURACY RULES - CRITICAL:
+ACCURACY RULES - CRITICAL (ZERO TOLERANCE FOR HALLUCINATION):
 - ONLY report information that is EXPLICITLY present in the provided data
 - NEVER invent, fabricate, or assume any details not in the source data
 - If data is missing or incomplete, say so - do NOT fill in gaps with assumptions
-- Quote actual content when relevant, do not embellish or add fictional details
 - If you cannot answer from the data provided, say "Information not available"
+
+VERBATIM CONTENT RULES - MANDATORY:
+- When showing message content, quotes, or text from sources, use the EXACT text - character for character
+- NEVER paraphrase, summarize creatively, or "improve" message content
+- NEVER add emojis, punctuation, or words that aren't in the original text
+- If source says "Ok. Sure" - display exactly "Ok. Sure", NOT "Ok! Sure 🔥" or "Okay, sure!"
+- Use quotation marks to clearly indicate verbatim content: "exact text here"
+- This applies to: Slack messages, Jira descriptions, GitHub comments, emails, file contents, ALL text data
 
 Guidelines:
 - Present information in a logical, organized manner

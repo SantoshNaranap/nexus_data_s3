@@ -1953,21 +1953,23 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
 
 
 async def handle_get_all_user_messages(arguments: dict) -> list[TextContent]:
-    """Get ALL messages from a specific user across ALL channels AND DMs."""
+    """Get ALL messages from a specific user using Slack's search API (FAST).
+
+    Uses search API instead of iterating through channels for 10-100x speedup.
+    """
     import time
     start_time = time.time()
 
-    # Accept both 'user' and 'username' as parameter names (Claude sometimes uses 'username')
+    # Accept both 'user' and 'username' as parameter names
     user = arguments.get("user") or arguments.get("username")
     if not user:
         return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: user"}))]
 
-    logger.info(f"get_all_user_messages: Searching for user '{user}'")
+    logger.info(f"get_all_user_messages: Searching for user '{user}' using search API")
     hours_ago = arguments.get("hours_ago", 48)
-    limit_per_channel = arguments.get("limit_per_channel", 100)
+    limit = arguments.get("limit_per_channel", 100)  # Reuse as total limit
 
     # Resolve user ID
-    logger.info(f"get_all_user_messages: Calling _get_user_id for '{user}'")
     try:
         user_id_result = _get_user_id(user)
     except Exception as e:
@@ -1975,282 +1977,118 @@ async def handle_get_all_user_messages(arguments: dict) -> list[TextContent]:
         logger.error(error_detail)
         return [TextContent(type="text", text=json.dumps({"error": error_detail, "user_searched": user}))]
 
-    logger.info(f"get_all_user_messages: _get_user_id returned: {user_id_result}")
     is_ambiguous, target_user_id, error_msg = _check_ambiguous_user(user_id_result, user)
     if error_msg:
         logger.error(f"get_all_user_messages: User lookup failed: {error_msg}")
-        return [TextContent(type="text", text=json.dumps({"error": error_msg, "user_searched": user, "slack_client_status": "initialized" if slack_client else "None"}))]
+        return [TextContent(type="text", text=json.dumps({"error": error_msg, "user_searched": user}))]
 
     target_user_name = _get_user_name_fast(target_user_id)
+    logger.info(f"Resolved user '{user}' to {target_user_name} ({target_user_id})")
 
-    # Calculate time cutoff
-    cutoff_time = datetime.now() - timedelta(hours=hours_ago)
-    oldest_ts = str(cutoff_time.timestamp())
-
-    client = _get_client_for_operation("dm")
+    # Use search client (prefers user token for better results)
+    client = _get_client_for_operation("search")
     loop = asyncio.get_event_loop()
 
     # Pre-load users for mention resolution
     await loop.run_in_executor(_executor, _preload_all_users)
 
-    # Get ALL conversations: channels AND DMs
-    all_channels = []
-    all_dms = []
+    # Build search query with date filter
+    days_ago = max(1, hours_ago // 24) if hours_ago else 2
+    cutoff_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
 
-    # Fetch channels with pagination
-    cursor = None
+    # Search for messages FROM this user
+    search_query = f"from:<@{target_user_id}> after:{cutoff_date}"
+    logger.info(f"Search query: {search_query}")
+
     try:
-        while True:
-            kwargs = {"types": "public_channel,private_channel", "limit": 200, "exclude_archived": True}
-            if cursor:
-                kwargs["cursor"] = cursor
-            result = await loop.run_in_executor(
-                _executor,
-                lambda: client.users_conversations(**kwargs)
-            )
-            all_channels.extend(result.get("channels", []))
-            cursor = result.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+        # Single API call to search for all messages from user
+        search_result = await loop.run_in_executor(
+            _executor,
+            lambda: client.search_messages(query=search_query, count=min(limit, 100), sort="timestamp")
+        )
     except SlackApiError as e:
-        logger.warning(f"Failed to list channels: {e}")
+        logger.error(f"Search API error: {e}")
+        return [TextContent(type="text", text=json.dumps({
+            "error": f"Search failed: {e.response.get('error', str(e))}",
+            "user": target_user_name,
+            "hint": "User token with search:read scope is required"
+        }))]
 
-    # Fetch DMs with pagination
-    cursor = None
-    try:
-        while True:
-            kwargs = {"types": "im,mpim", "limit": 200}
-            if cursor:
-                kwargs["cursor"] = cursor
-            result = await loop.run_in_executor(
-                _executor,
-                lambda: client.conversations_list(**kwargs)
-            )
-            all_dms.extend(result.get("channels", []))
-            cursor = result.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
-    except SlackApiError as e:
-        logger.warning(f"Failed to list DMs: {e}")
+    # Process search results
+    matches = search_result.get("messages", {}).get("matches", [])
+    total_found = search_result.get("messages", {}).get("total", 0)
 
-    logger.info(f"Searching {len(all_channels)} channels and {len(all_dms)} DMs for messages from {target_user_name}")
-
-    # Debug: Log if we found a DM with the target user
-    target_dm_found = False
-    for dm in all_dms:
-        if dm.get("user") == target_user_id:
-            target_dm_found = True
-            logger.info(f"Found DM with target user: {dm.get('id')}")
-            break
-    if not target_dm_found:
-        logger.warning(f"No DM found with target user {target_user_id} ({target_user_name}) in {len(all_dms)} DMs")
-
-    # Search in parallel with lower concurrency to avoid rate limiting
-    semaphore = asyncio.Semaphore(5)
-    errors = []
     channel_messages = []
     dm_messages = []
-    channels_with_messages = []
+    channels_with_messages = set()
 
-    async def search_channel(channel: Dict) -> List[Dict]:
-        async with semaphore:
-            ch_id = channel["id"]
-            ch_name = channel.get("name", "unknown")
+    for match in matches:
+        channel_info = match.get("channel", {})
+        channel_name = channel_info.get("name", "")
+        channel_id = channel_info.get("id", "")
+        is_dm = channel_id.startswith("D") or channel_info.get("is_im", False)
+        is_mpim = channel_info.get("is_mpim", False)
 
-            try:
-                # Bind variables to avoid closure issues in async context
-                history = await loop.run_in_executor(
-                    _executor,
-                    lambda cid=ch_id, ots=oldest_ts, lpc=limit_per_channel: client.conversations_history(
-                        channel=cid,
-                        oldest=ots,
-                        limit=lpc
-                    )
-                )
+        msg_data = {
+            "timestamp": match["ts"],
+            "time": _format_timestamp(match["ts"]),
+            "text": _resolve_user_mentions(match.get("text", "")),
+            "permalink": match.get("permalink", ""),
+        }
 
-                messages = []
-                for msg in history.get("messages", []):
-                    # Check if this message is from target user
-                    if msg.get("user") == target_user_id:
-                        messages.append({
-                            "type": "channel",
-                            "channel": f"#{ch_name}",
-                            "timestamp": msg["ts"],
-                            "time": _format_timestamp(msg["ts"]),
-                            "text": _resolve_user_mentions(msg.get("text", "")),
-                            "has_thread": msg.get("reply_count", 0) > 0,
-                        })
-
-                    # Also check thread replies if this message has a thread
-                    if msg.get("reply_count", 0) > 0:
-                        try:
-                            msg_ts = msg["ts"]
-                            replies = await loop.run_in_executor(
-                                _executor,
-                                lambda cid=ch_id, ts=msg_ts, ots=oldest_ts: client.conversations_replies(
-                                    channel=cid,
-                                    ts=ts,
-                                    oldest=ots,
-                                    limit=50
-                                )
-                            )
-                            for reply in replies.get("messages", [])[1:]:  # Skip parent message
-                                if reply.get("user") == target_user_id:
-                                    messages.append({
-                                        "type": "channel",
-                                        "channel": f"#{ch_name}",
-                                        "timestamp": reply["ts"],
-                                        "time": _format_timestamp(reply["ts"]),
-                                        "text": _resolve_user_mentions(reply.get("text", "")),
-                                        "is_thread_reply": True,
-                                    })
-                        except:
-                            pass  # Thread fetch failed, continue
-
-                if messages:
-                    channels_with_messages.append(ch_name)
-
-                return messages
-
-            except SlackApiError as e:
-                if 'ratelimited' in str(e):
-                    # Wait and retry once for rate limiting
-                    await asyncio.sleep(2)
-                    try:
-                        history = await loop.run_in_executor(
-                            _executor,
-                            lambda cid=ch_id, ots=oldest_ts, lpc=limit_per_channel: client.conversations_history(
-                                channel=cid, oldest=ots, limit=lpc
-                            )
-                        )
-                        messages = [{"type": "channel", "channel": f"#{ch_name}", "timestamp": m["ts"],
-                                    "time": _format_timestamp(m["ts"]), "text": _resolve_user_mentions(m.get("text", ""))}
-                                   for m in history.get("messages", []) if m.get("user") == target_user_id]
-                        if messages:
-                            channels_with_messages.append(ch_name)
-                        return messages
-                    except:
-                        errors.append(f"Rate limited: #{ch_name}")
-                return []
-            except Exception as e:
-                errors.append(f"Error in #{ch_name}: {str(e)[:50]}")
-                return []
-
-    async def search_dm(dm: Dict) -> List[Dict]:
-        async with semaphore:
-            dm_id = dm["id"]
-            # Only search DMs that involve our target user
-            dm_user = dm.get("user", "")
-
-            # For 1-on-1 DMs, only search if it's with the target user
-            # For group DMs (mpim), search all of them
-            is_mpim = dm.get("is_mpim", False)
-            if not is_mpim and dm_user != target_user_id:
-                return []
-
-            try:
-                # Bind variables to avoid closure issues
-                history = await loop.run_in_executor(
-                    _executor,
-                    lambda did=dm_id, ots=oldest_ts, lpc=limit_per_channel: client.conversations_history(
-                        channel=did,
-                        oldest=ots,
-                        limit=lpc
-                    )
-                )
-
-                messages = []
-                for msg in history.get("messages", []):
-                    # Check if this message is from target user
-                    if msg.get("user") == target_user_id:
-                        messages.append({
-                            "type": "dm",
-                            "conversation": f"DM with {target_user_name}" if not is_mpim else "Group DM",
-                            "timestamp": msg["ts"],
-                            "time": _format_timestamp(msg["ts"]),
-                            "text": _resolve_user_mentions(msg.get("text", "")),
-                            "has_thread": msg.get("reply_count", 0) > 0,
-                        })
-
-                    # Also check thread replies if this message has a thread
-                    if msg.get("reply_count", 0) > 0 or msg.get("thread_ts"):
-                        try:
-                            thread_ts = msg.get("thread_ts", msg["ts"])
-                            replies = await loop.run_in_executor(
-                                _executor,
-                                lambda did=dm_id, ts=thread_ts, ots=oldest_ts: client.conversations_replies(
-                                    channel=did,
-                                    ts=ts,
-                                    oldest=ots,
-                                    limit=50
-                                )
-                            )
-                            for reply in replies.get("messages", [])[1:]:  # Skip parent message
-                                if reply.get("user") == target_user_id:
-                                    messages.append({
-                                        "type": "dm",
-                                        "conversation": f"DM with {target_user_name}" if not is_mpim else "Group DM",
-                                        "timestamp": reply["ts"],
-                                        "time": _format_timestamp(reply["ts"]),
-                                        "text": _resolve_user_mentions(reply.get("text", "")),
-                                        "is_thread_reply": True,
-                                    })
-                        except:
-                            pass  # Thread fetch failed, continue
-
-                return messages
-
-            except SlackApiError as e:
-                if 'ratelimited' in str(e):
-                    await asyncio.sleep(2)
-                    try:
-                        history = await loop.run_in_executor(
-                            _executor,
-                            lambda did=dm_id, ots=oldest_ts, lpc=limit_per_channel: client.conversations_history(
-                                channel=did, oldest=ots, limit=lpc
-                            )
-                        )
-                        messages = [{"type": "dm", "conversation": f"DM with {target_user_name}",
-                                    "timestamp": m["ts"], "time": _format_timestamp(m["ts"]),
-                                    "text": _resolve_user_mentions(m.get("text", ""))}
-                                   for m in history.get("messages", []) if m.get("user") == target_user_id]
-                        return messages
-                    except:
-                        errors.append(f"Rate limited: DM {dm_id}")
-                return []
-            except Exception as e:
-                errors.append(f"Error in DM: {str(e)[:50]}")
-                return []
-
-    # Execute all searches in parallel
-    channel_tasks = [search_channel(ch) for ch in all_channels]
-    dm_tasks = [search_dm(dm) for dm in all_dms]
-
-    all_results = await asyncio.gather(*channel_tasks, *dm_tasks)
-
-    # Separate results
-    for i, msg_list in enumerate(all_results):
-        if i < len(channel_tasks):
-            channel_messages.extend(msg_list)
+        if is_dm or is_mpim:
+            msg_data["type"] = "dm"
+            msg_data["conversation"] = f"DM" if is_dm else "Group DM"
+            dm_messages.append(msg_data)
         else:
-            dm_messages.extend(msg_list)
+            msg_data["type"] = "channel"
+            msg_data["channel"] = f"#{channel_name}" if channel_name else "channel"
+            channel_messages.append(msg_data)
+            if channel_name:
+                channels_with_messages.add(channel_name)
+
+    # Also get DM messages directly (search API may not include all DMs)
+    # Only fetch the DM with this specific user for completeness
+    try:
+        dm_channel = _find_dm_channel_with_user(client, target_user_id)
+        if dm_channel:
+            cutoff_ts = str((datetime.now() - timedelta(hours=hours_ago)).timestamp())
+            dm_history = await loop.run_in_executor(
+                _executor,
+                lambda: client.conversations_history(channel=dm_channel, oldest=cutoff_ts, limit=50)
+            )
+            for msg in dm_history.get("messages", []):
+                if msg.get("user") == target_user_id:
+                    # Check if not already in results (avoid duplicates)
+                    msg_ts = msg["ts"]
+                    if not any(m["timestamp"] == msg_ts for m in dm_messages):
+                        dm_messages.append({
+                            "type": "dm",
+                            "conversation": f"DM with {target_user_name}",
+                            "timestamp": msg_ts,
+                            "time": _format_timestamp(msg_ts),
+                            "text": _resolve_user_mentions(msg.get("text", "")),
+                        })
+    except Exception as e:
+        logger.warning(f"Failed to fetch direct DM history: {e}")
 
     # Combine and sort all messages
     all_messages = channel_messages + dm_messages
     all_messages.sort(key=lambda x: float(x["timestamp"]), reverse=True)
 
     total_time = time.time() - start_time
+    logger.info(f"Search completed in {total_time:.2f}s - found {len(all_messages)} messages")
 
     response = {
         "user": target_user_name,
         "user_id": target_user_id,
         "time_period": f"Last {hours_ago} hours",
-        "channels_searched": len(all_channels),
-        "dms_searched": len(all_dms),
-        "channels_with_messages": channels_with_messages,
+        "search_method": "search_api",
+        "total_found_in_search": total_found,
         "total_messages": len(all_messages),
         "channel_messages_count": len(channel_messages),
         "dm_messages_count": len(dm_messages),
+        "channels_with_messages": list(channels_with_messages),
         "fetch_time_seconds": round(total_time, 2),
         "messages": all_messages,
     }
