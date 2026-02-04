@@ -246,32 +246,25 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
     SLACK = """
 SLACK-SPECIFIC GUIDELINES:
 
-**NATURAL LANGUAGE INTERPRETATION - YOU MUST PARSE:**
-When user asks about messages, YOU formulate the search:
-- "messages from John" → search_messages with user filter for "John"
-- "what did I miss today" → search_messages with today's date range
-- "discussions about the project" → search_messages(query="project")
-- "messages in #general" → read_messages(channel="general") or search in that channel
+**KEY TOOLS:**
+- `get_all_recent_messages(hours_ago)` - Get ALL recent messages (DMs + channels). Use for "catch me up", "what did I miss"
+- `search_messages(query, limit)` - Search all messages for keywords
+- `read_dm_with_user(user, limit)` - Read DM with a specific person (works with first names)
+- `read_messages(channel, limit)` - Read messages from a specific channel
+- `list_channels()` / `list_users()` / `list_dms()` - List available items
 
-**USER NAME HANDLING:**
-- If user mentions a name (e.g., "from Akash"), search for messages by/mentioning that user
-- Use list_users to find the user's Slack ID if needed
-- Be flexible with name matching (first name, last name, display name)
+**EXAMPLES:**
+- "What did I miss yesterday" → get_all_recent_messages(hours_ago=24)
+- "Catch me up on Slack" → get_all_recent_messages(hours_ago=24)
+- "Messages from Akash" → read_dm_with_user(user="Akash", limit=30)
+- "Search for API credentials" → search_messages(query="API credentials", limit=50)
+- "What's happening in #general" → read_messages(channel="general", limit=50)
 
-**DATE/TIME HANDLING:**
-- "today" → messages from today
-- "last week" → messages from past 7 days
-- "yesterday" → messages from yesterday
-- Convert these to appropriate date filters
-
-**CHANNEL HANDLING:**
-- "#general" or "general channel" → channel="general"
-- Use list_channels to find channel names if unclear
-
-**MESSAGE CONTENT RULES (CRITICAL):**
-- Quote messages EXACTLY as returned - no modifications
-- NEVER add emojis or change punctuation
-- NEVER attribute messages unless explicitly in the data
+**IMPORTANT:**
+- Use `get_all_recent_messages` for broad "catch me up" queries - don't loop through DMs individually
+- First names work for `read_dm_with_user` - no need to find user IDs first
+- Quote messages EXACTLY as returned - never modify content or add emojis
+- Never attribute messages to someone unless explicitly in the tool response
 """
 
     GITHUB = """
