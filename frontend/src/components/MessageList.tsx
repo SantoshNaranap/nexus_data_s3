@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react'
 import type { ChatMessage } from '../types'
 import MarkdownMessage from './MarkdownMessage'
 import ThinkingIndicator, { ThinkingIndicatorStreaming } from './ThinkingIndicator'
-import { useWittyMessages } from '../hooks/useWittyMessages'
+import ErrorInvestigationPanel from './ErrorInvestigation'
 
 interface MessageListProps {
   messages: ChatMessage[]
@@ -10,7 +10,27 @@ interface MessageListProps {
   thinkingContent: string
   isActivelyThinking: boolean
   isStreaming: boolean
+  isInvestigating?: boolean
   onFollowUpClick: (question: string) => void
+}
+
+// Progress messages that change based on elapsed time
+const getProgressMessage = (elapsedSeconds: number): string => {
+  if (elapsedSeconds < 3) return "Connecting to service..."
+  if (elapsedSeconds < 8) return "Querying your data..."
+  if (elapsedSeconds < 15) return "Processing results..."
+  if (elapsedSeconds < 25) return "Analyzing information..."
+  if (elapsedSeconds < 40) return "Preparing your response..."
+  if (elapsedSeconds < 60) return "Almost there, finalizing..."
+  return "Still working on it..."
+}
+
+// Format elapsed time nicely
+const formatElapsedTime = (seconds: number): string => {
+  if (seconds < 60) return `${seconds}s`
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  return `${mins}m ${secs}s`
 }
 
 export default function MessageList({
@@ -19,12 +39,35 @@ export default function MessageList({
   thinkingContent,
   isActivelyThinking,
   isStreaming,
+  isInvestigating = false,
   onFollowUpClick,
 }: MessageListProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const startTimeRef = useRef<number | null>(null)
 
-  const connectingMessage = useWittyMessages(isStreaming && !thinkingContent && !streamingMessage, 'connecting', 2000)
+  // Track elapsed time during streaming
+  useEffect(() => {
+    if (isStreaming && !streamingMessage) {
+      // Start timer when streaming begins (before content arrives)
+      if (!startTimeRef.current) {
+        startTimeRef.current = Date.now()
+      }
+
+      const interval = setInterval(() => {
+        if (startTimeRef.current) {
+          setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
+        }
+      }, 1000)
+
+      return () => clearInterval(interval)
+    } else if (!isStreaming) {
+      // Reset when streaming stops
+      startTimeRef.current = null
+      setElapsedSeconds(0)
+    }
+  }, [isStreaming, streamingMessage])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -116,6 +159,14 @@ export default function MessageList({
                     </div>
                   </div>
                 )}
+
+                {/* Error Investigation Panel */}
+                {(message.errorInvestigation || (isInvestigating && index === messages.length - 1)) && (
+                  <ErrorInvestigationPanel
+                    investigation={message.errorInvestigation!}
+                    isInvestigating={isInvestigating && index === messages.length - 1 && !message.errorInvestigation}
+                  />
+                )}
               </>
             )}
             {message.timestamp && (
@@ -179,16 +230,38 @@ export default function MessageList({
               </div>
             )}
             {!thinkingContent && !isActivelyThinking && !streamingMessage && (
-              <div className="bg-white dark:bg-gray-800 rounded-2xl px-5 py-3 border border-gray-200 dark:border-gray-700 transition-colors duration-200">
-                <div className="flex items-center space-x-3">
-                  <div className="flex space-x-1">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+              <div className="bg-white dark:bg-gray-800 rounded-2xl px-5 py-4 border border-gray-200 dark:border-gray-700 transition-colors duration-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-3">
+                    {/* Animated spinner */}
+                    <div className="relative">
+                      <div className="w-8 h-8 rounded-full border-2 border-blue-200 dark:border-blue-800" />
+                      <div className="absolute inset-0 w-8 h-8 rounded-full border-2 border-transparent border-t-blue-500 animate-spin" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-700 dark:text-gray-200 transition-all duration-500">
+                        {getProgressMessage(elapsedSeconds)}
+                      </p>
+                      {/* Progress bar */}
+                      <div className="mt-1.5 w-48 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-blue-500 to-purple-500 rounded-full transition-all duration-1000"
+                          style={{
+                            width: `${Math.min(95, (elapsedSeconds / 60) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
                   </div>
-                  <span className="text-sm text-gray-500 dark:text-gray-400 transition-all duration-300">
-                    {connectingMessage}
-                  </span>
+                  {/* Elapsed time badge */}
+                  <div className="flex items-center space-x-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded-full">
+                    <svg className="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="text-xs font-mono text-gray-600 dark:text-gray-300">
+                      {formatElapsedTime(elapsedSeconds)}
+                    </span>
+                  </div>
                 </div>
               </div>
             )}

@@ -518,54 +518,96 @@ Includes member count, topic, purpose, and creation date.""",
             },
         ),
 
-        # Message tools
+        # Consolidated message tools
         Tool(
-            name="read_messages",
-            description="""Read recent messages from a Slack channel.
+            name="find_messages",
+            description="""Find Slack messages. Smart routing based on parameters provided.
 
-Returns the latest messages with sender info and timestamps.
-Great for catching up on channel activity or finding specific discussions.""",
+USE THIS FOR ANY MESSAGE QUERY — it automatically picks the best strategy.
+
+How it works:
+- user only → finds all messages from that person across all channels
+- channel only → reads recent messages in that channel
+- user + channel → finds that person's messages in that specific channel
+- query only → keyword search across all of Slack
+- query + in_dms_only=true → searches only in DMs
+- user as DM target → reads your DM conversation with that person (set dm_with=true)
+
+Examples:
+- "What did John say?" → find_messages(user="John")
+- "Messages in #general" → find_messages(channel="general")
+- "John's messages in #engineering" → find_messages(user="John", channel="engineering")
+- "Search for deployment" → find_messages(query="deployment")
+- "My DMs with John" → find_messages(user="John", dm_with=true)""",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "user": {
+                        "type": "string",
+                        "description": "Person's name, email, or ID",
+                    },
                     "channel": {
                         "type": "string",
                         "description": "Channel name (e.g., 'general') or ID",
                     },
+                    "query": {
+                        "type": "string",
+                        "description": "Search keyword or phrase",
+                    },
+                    "dm_with": {
+                        "type": "boolean",
+                        "description": "If true with user param, reads your DM conversation with that person",
+                        "default": False,
+                    },
+                    "in_dms_only": {
+                        "type": "boolean",
+                        "description": "If true with query param, searches only in DMs",
+                        "default": False,
+                    },
+                    "hours_ago": {
+                        "type": "integer",
+                        "description": "Time range in hours (default: 48 for user queries, 24 for channels)",
+                        "default": 48,
+                    },
                     "limit": {
                         "type": "integer",
-                        "description": "Number of messages to retrieve (default: 20, max: 100)",
-                        "default": 20,
+                        "description": "Max results (default: 50)",
+                        "default": 50,
                     },
                 },
-                "required": ["channel"],
             },
         ),
         Tool(
-            name="search_messages",
-            description="""Search for messages across Slack.
+            name="get_slack_summary",
+            description="""Get a summary of ALL recent Slack activity across DMs and channels.
 
-Search by keywords, in specific channels, from specific users, or within date ranges.
-Returns matching messages with context. Defaults to last 30 days for relevance.""",
+USE THIS WHEN:
+- "what did I miss?"
+- "catch me up"
+- "summarize my Slack"
+- "what's been happening?"
+- "my recent messages"
+
+Returns messages from ALL your DMs and channels, sorted by time.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (supports Slack search modifiers like 'from:@user', 'in:#channel')",
-                    },
-                    "limit": {
+                    "hours_ago": {
                         "type": "integer",
-                        "description": "Max results to return (default: 20)",
-                        "default": 20,
+                        "description": "How far back to look (default: 24)",
+                        "default": 24,
                     },
-                    "days_ago": {
-                        "type": "integer",
-                        "description": "Search messages from the last N days (default: 30). Set to 0 for all time.",
-                        "default": 30,
+                    "include_channels": {
+                        "type": "boolean",
+                        "description": "Include channel messages (default: true)",
+                        "default": True,
+                    },
+                    "include_dms": {
+                        "type": "boolean",
+                        "description": "Include DM messages (default: true)",
+                        "default": True,
                     },
                 },
-                "required": ["query"],
             },
         ),
         Tool(
@@ -746,74 +788,6 @@ Filter by channel, user, or file type.""",
 
         # DM/Conversation tools
         Tool(
-            name="read_dm_with_user",
-            description="""Read direct message conversation with a specific user.
-
-Use this to:
-- Get conversation history between you and another person
-- Summarize discussions with a colleague
-- Find messages exchanged with someone
-
-Supports date filtering to narrow down to specific time periods.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "user": {
-                        "type": "string",
-                        "description": "User name, real name, email, or ID to get DM history with",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Number of messages to retrieve (default: 50, max: 200)",
-                        "default": 50,
-                    },
-                    "days_ago": {
-                        "type": "integer",
-                        "description": "Only get messages from the last N days (default: all)",
-                    },
-                    "since_date": {
-                        "type": "string",
-                        "description": "Get messages since this date (YYYY-MM-DD format)",
-                    },
-                },
-                "required": ["user"],
-            },
-        ),
-        Tool(
-            name="get_user_messages_in_channel",
-            description="""Get all messages from a specific user in a channel.
-
-Use this to:
-- See what someone has said in a channel
-- Track a person's contributions to a discussion
-- Find messages from a specific colleague
-
-Supports date filtering.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "channel": {
-                        "type": "string",
-                        "description": "Channel name or ID",
-                    },
-                    "user": {
-                        "type": "string",
-                        "description": "User name, real name, email, or ID",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max messages to scan (default: 100, max: 500)",
-                        "default": 100,
-                    },
-                    "days_ago": {
-                        "type": "integer",
-                        "description": "Only get messages from the last N days",
-                    },
-                },
-                "required": ["channel", "user"],
-            },
-        ),
-        Tool(
             name="list_dms",
             description="""List all direct message conversations.
 
@@ -829,32 +803,6 @@ Useful for discovering who you've been messaging.""",
                     },
                 },
                 "required": [],
-            },
-        ),
-        Tool(
-            name="search_in_dms",
-            description="""Search for specific content across all your direct messages.
-
-Use this to:
-- Find credentials, passwords, or API keys someone sent you
-- Search for specific information shared privately
-- Find links or files shared in DMs
-
-Searches across ALL your DM conversations.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (e.g., 'mysql password', 'API key', 'credentials')",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results to return (default: 30)",
-                        "default": 30,
-                    },
-                },
-                "required": ["query"],
             },
         ),
         Tool(
@@ -879,79 +827,6 @@ Returns message count, active users, and key discussion topics.""",
                 "required": ["channel"],
             },
         ),
-        Tool(
-            name="get_all_recent_messages",
-            description="""Get ALL your recent messages across ALL DMs and channels.
-
-USE THIS TOOL WHEN:
-- User asks "what messages did I get yesterday?"
-- User asks "summarize my Slack messages"
-- User asks "what did I miss?" or "catch me up"
-- User wants a comprehensive view of recent activity
-- User asks about messages from a specific time period
-
-This is the PRIMARY tool for getting a comprehensive view of recent Slack activity.
-Returns messages from all DMs and channels the user is part of, sorted by time.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "hours_ago": {
-                        "type": "integer",
-                        "description": "Get messages from the last N hours (default: 24)",
-                        "default": 24,
-                    },
-                    "include_channels": {
-                        "type": "boolean",
-                        "description": "Include channel messages (default: true)",
-                        "default": True,
-                    },
-                    "include_dms": {
-                        "type": "boolean",
-                        "description": "Include DM messages (default: true)",
-                        "default": True,
-                    },
-                    "max_messages_per_conversation": {
-                        "type": "integer",
-                        "description": "Max messages per DM/channel (default: 20)",
-                        "default": 20,
-                    },
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="get_all_user_messages",
-            description="""Get ALL messages from a specific user across ALL channels you're in.
-
-USE THIS TOOL WHEN:
-- User asks "What did [person] say?" or "What has [person] been saying?"
-- User asks about someone's activity across Slack
-- User wants to see everything a specific person posted
-
-This searches ALL channels you're a member of (including private channels)
-and returns all messages from the specified user within the time period.
-Much more comprehensive than search_messages for finding a user's activity.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "user": {
-                        "type": "string",
-                        "description": "User name, real name, email, or ID to find messages from",
-                    },
-                    "hours_ago": {
-                        "type": "integer",
-                        "description": "Get messages from the last N hours (default: 48)",
-                        "default": 48,
-                    },
-                    "limit_per_channel": {
-                        "type": "integer",
-                        "description": "Max messages to check per channel (default: 100)",
-                        "default": 100,
-                    },
-                },
-                "required": ["user"],
-            },
-        ),
     ]
 
 
@@ -959,14 +834,21 @@ Much more comprehensive than search_messages for finding a user's activity.""",
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
     try:
-        if name == "list_channels":
+        # === Consolidated message tools ===
+        if name == "find_messages":
+            return await handle_find_messages(arguments)
+        elif name == "get_slack_summary":
+            return await handle_get_all_recent_messages({
+                "hours_ago": arguments.get("hours_ago", 24),
+                "include_channels": arguments.get("include_channels", True),
+                "include_dms": arguments.get("include_dms", True),
+            })
+
+        # === Unchanged tools ===
+        elif name == "list_channels":
             return await handle_list_channels(arguments)
         elif name == "get_channel_info":
             return await handle_get_channel_info(arguments)
-        elif name == "read_messages":
-            return await handle_read_messages(arguments)
-        elif name == "search_messages":
-            return await handle_search_messages(arguments)
         elif name == "send_message":
             return await handle_send_message(arguments)
         elif name == "send_dm":
@@ -983,17 +865,22 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return await handle_add_reaction(arguments)
         elif name == "list_files":
             return await handle_list_files(arguments)
-        # New DM/conversation tools
+        elif name == "list_dms":
+            return await handle_list_dms(arguments)
+        elif name == "get_channel_activity":
+            return await handle_get_channel_activity(arguments)
+
+        # === Legacy tool names still work (backward compatibility) ===
+        elif name == "read_messages":
+            return await handle_read_messages(arguments)
+        elif name == "search_messages":
+            return await handle_search_messages(arguments)
         elif name == "read_dm_with_user":
             return await handle_read_dm_with_user(arguments)
         elif name == "get_user_messages_in_channel":
             return await handle_get_user_messages_in_channel(arguments)
-        elif name == "list_dms":
-            return await handle_list_dms(arguments)
         elif name == "search_in_dms":
             return await handle_search_in_dms(arguments)
-        elif name == "get_channel_activity":
-            return await handle_get_channel_activity(arguments)
         elif name == "get_all_recent_messages":
             return await handle_get_all_recent_messages(arguments)
         elif name == "get_all_user_messages":
@@ -1006,6 +893,69 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     except Exception as e:
         logger.error(f"Unexpected error in {name}: {str(e)}")
         return [TextContent(type="text", text=f"Unexpected error: {str(e)}")]
+
+
+async def handle_find_messages(arguments: dict) -> list[TextContent]:
+    """Smart router for find_messages — delegates to the appropriate handler."""
+    user = arguments.get("user")
+    channel = arguments.get("channel")
+    query = arguments.get("query")
+    dm_with = arguments.get("dm_with", False)
+    in_dms_only = arguments.get("in_dms_only", False)
+    hours_ago = arguments.get("hours_ago", 48)
+    limit = arguments.get("limit", 50)
+
+    # Route: DM with a specific user
+    if user and dm_with:
+        return await handle_read_dm_with_user({
+            "user": user,
+            "limit": limit,
+            "days_ago": max(1, hours_ago // 24),
+        })
+
+    # Route: User + channel → messages from user in that channel
+    if user and channel:
+        return await handle_get_user_messages_in_channel({
+            "channel": channel,
+            "user": user,
+            "limit": limit,
+            "days_ago": max(1, hours_ago // 24),
+        })
+
+    # Route: User only → all messages from that person across workspace
+    if user and not channel and not query:
+        return await handle_get_all_user_messages({
+            "user": user,
+            "hours_ago": hours_ago,
+            "limit_per_channel": limit,
+        })
+
+    # Route: Channel only → read that channel
+    if channel and not user and not query:
+        return await handle_read_messages({
+            "channel": channel,
+            "limit": limit,
+        })
+
+    # Route: Query + DMs only
+    if query and in_dms_only:
+        return await handle_search_in_dms({
+            "query": query,
+            "limit": limit,
+        })
+
+    # Route: Query (keyword search)
+    if query:
+        return await handle_search_messages({
+            "query": query,
+            "limit": limit,
+            "days_ago": max(1, hours_ago // 24),
+        })
+
+    # Fallback: no specific params → get recent activity
+    return await handle_get_all_recent_messages({
+        "hours_ago": hours_ago,
+    })
 
 
 # ==================== Channel Handlers ====================
@@ -1071,7 +1021,9 @@ async def handle_list_channels(arguments: dict) -> list[TextContent]:
 
 async def handle_get_channel_info(arguments: dict) -> list[TextContent]:
     """Get channel details."""
-    channel = arguments["channel"]
+    channel = arguments.get("channel")
+    if not channel:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: channel"}))]
     channel_id = _get_channel_id(channel)
 
     if not channel_id:
@@ -1101,7 +1053,13 @@ async def handle_get_channel_info(arguments: dict) -> list[TextContent]:
 
 async def handle_read_messages(arguments: dict) -> list[TextContent]:
     """Read messages from a channel."""
-    channel = arguments["channel"]
+    channel = arguments.get("channel")
+    if not channel:
+        return [TextContent(type="text", text=json.dumps({
+            "error": "Missing required parameter: channel",
+            "hint": "Please specify a channel name like #general or use 'get_all_recent_messages' for all channels",
+            "example": "read_messages(channel='general', limit=20)"
+        }))]
     limit = min(arguments.get("limit", 20), 100)
 
     channel_id = _get_channel_id(channel)
@@ -1150,7 +1108,9 @@ async def handle_read_messages(arguments: dict) -> list[TextContent]:
 
 async def handle_search_messages(arguments: dict) -> list[TextContent]:
     """Search messages with default time filter for relevance."""
-    query = arguments["query"]
+    query = arguments.get("query")
+    if not query:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: query"}))]
     limit = arguments.get("limit", 100)  # Increased default for better coverage
     days_ago = arguments.get("days_ago", 30)  # Default to last 30 days for relevance
 
@@ -1489,7 +1449,12 @@ def _find_dm_channel_with_user(client: WebClient, target_user_id: str) -> Option
 
 async def handle_read_dm_with_user(arguments: dict) -> list[TextContent]:
     """Read DM conversation with a specific user."""
-    user = arguments["user"]
+    user = arguments.get("user")
+    if not user:
+        return [TextContent(type="text", text=json.dumps({
+            "error": "Missing required parameter: user",
+            "hint": "Please specify a user name like @john or just 'John'"
+        }))]
     limit = min(arguments.get("limit", 50), 200)
     days_ago = arguments.get("days_ago")
     since_date = arguments.get("since_date")
@@ -1662,7 +1627,9 @@ async def handle_list_dms(arguments: dict) -> list[TextContent]:
 
 async def handle_search_in_dms(arguments: dict) -> list[TextContent]:
     """Search for content across DMs."""
-    query = arguments["query"]
+    query = arguments.get("query")
+    if not query:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: query"}))]
     limit = arguments.get("limit", 30)
 
     # Use user client for DM search
@@ -1756,19 +1723,36 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
     import time
     start_time = time.time()
 
+    # Performance limits to prevent timeouts
+    MAX_CHANNELS = 20  # Only check top 20 most relevant channels
+    MAX_DMS = 30       # Only check top 30 DMs
+    TIMEOUT_SECONDS = 45  # Overall timeout
+
     hours_ago = arguments.get("hours_ago", 24)
     include_channels = arguments.get("include_channels", True)
     include_dms = arguments.get("include_dms", True)
-    max_per_convo = arguments.get("max_messages_per_conversation", 20)
+    max_per_convo = arguments.get("max_messages_per_conversation", 10)  # Reduced default
 
     # Calculate time cutoff
     cutoff_time = datetime.now() - timedelta(hours=hours_ago)
     oldest_ts = str(cutoff_time.timestamp())
 
-    client = _get_client_for_operation("dm")
+    try:
+        client = _get_client_for_operation("dm")
+    except Exception as e:
+        return [TextContent(type="text", text=json.dumps({
+            "error": "No Slack client available",
+            "detail": str(e),
+            "hint": "Please ensure Slack tokens are configured"
+        }))]
+
     all_messages: List[Dict] = []
     errors: List[str] = []
-    loop = asyncio.get_event_loop()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
 
     # Step 1: Pre-load all users into cache (single API call)
     logger.info("Pre-loading user cache...")
@@ -1812,14 +1796,20 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
     if include_channels:
         list_tasks.append(fetch_channel_list())
 
-    list_results = await asyncio.gather(*list_tasks)
+    list_results = await asyncio.gather(*list_tasks, return_exceptions=True)
+    # Filter out any exceptions from the results
+    list_results = [r if not isinstance(r, Exception) else [] for r in list_results]
 
     if include_dms and len(list_results) > 0:
         dm_channels = list_results[0]
     if include_channels:
         channels = list_results[-1] if include_dms else list_results[0]
 
-    logger.info(f"Found {len(dm_channels)} DMs and {len(channels)} channels to check")
+    # Limit to most relevant channels/DMs to prevent timeout
+    dm_channels = dm_channels[:MAX_DMS]
+    channels = channels[:MAX_CHANNELS]
+
+    logger.info(f"Checking {len(dm_channels)} DMs and {len(channels)} channels (limited for performance)")
 
     # Step 3: Fetch messages from all conversations IN PARALLEL
     # Use semaphore to limit concurrent requests (avoid rate limiting)
@@ -1910,10 +1900,19 @@ async def handle_get_all_recent_messages(arguments: dict) -> list[TextContent]:
     if include_channels:
         fetch_tasks.extend([fetch_channel_history(ch) for ch in channels])
 
-    # Execute all fetches in parallel
+    # Execute all fetches in parallel with exception handling and timeout
     logger.info(f"Fetching messages from {len(fetch_tasks)} conversations in parallel...")
     fetch_start = time.time()
-    results = await asyncio.gather(*fetch_tasks)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*fetch_tasks, return_exceptions=True),
+            timeout=TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"Fetch timed out after {TIMEOUT_SECONDS}s, returning partial results")
+        results = []
+    # Filter out exceptions and only keep successful results
+    results = [r if isinstance(r, list) else [] for r in results]
     logger.info(f"Parallel fetch completed in {time.time() - fetch_start:.2f}s")
 
     # Flatten results

@@ -25,6 +25,7 @@ interface DataSourceSidebarProps {
   onSelectDatasource: (datasource: DataSource) => void
   onOpenSettings: () => void
   configuredDatasources: Set<string>
+  expiredDatasources?: Set<string>
   isLoading: boolean
 }
 
@@ -34,6 +35,7 @@ export default function DataSourceSidebar({
   onSelectDatasource,
   onOpenSettings,
   configuredDatasources,
+  expiredDatasources = new Set(),
   isLoading,
 }: DataSourceSidebarProps) {
   if (isLoading) {
@@ -187,8 +189,10 @@ export default function DataSourceSidebar({
                       {datasource.name}
                     </div>
                     {isConfigured && (
-                      <div className="flex-shrink-0">
-                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <div className="flex-shrink-0" title={expiredDatasources.has(datasource.id) ? 'Token expired' : 'Connected'}>
+                        <div className={`w-2 h-2 rounded-full ${
+                          expiredDatasources.has(datasource.id) ? 'bg-amber-500' : 'bg-green-500'
+                        }`}></div>
                       </div>
                     )}
                   </div>

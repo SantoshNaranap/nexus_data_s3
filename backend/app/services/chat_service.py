@@ -32,9 +32,44 @@ logger = logging.getLogger(__name__)
 _stream_executor = ThreadPoolExecutor(max_workers=10)
 
 # In-memory session storage for anonymous users (no database)
-# Key: session_id, Value: list of messages
-_anonymous_sessions: dict[str, List[dict]] = {}
+# Key: session_id, Value: {"messages": [...], "last_accessed": float}
+_anonymous_sessions: dict[str, dict] = {}
 _SESSION_MAX_MESSAGES = 50  # Limit to prevent memory bloat
+_SESSION_TTL_SECONDS = 3600  # 1 hour TTL for anonymous sessions
+_SESSION_MAX_COUNT = 500  # Max total sessions to prevent unbounded growth
+_last_cleanup_time = 0.0
+
+
+def _cleanup_expired_sessions() -> None:
+    """Remove expired anonymous sessions. Called periodically."""
+    global _last_cleanup_time
+    now = time.time()
+
+    # Only run cleanup every 5 minutes
+    if now - _last_cleanup_time < 300:
+        return
+    _last_cleanup_time = now
+
+    expired = [
+        sid for sid, data in _anonymous_sessions.items()
+        if now - data.get("last_accessed", 0) > _SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        del _anonymous_sessions[sid]
+
+    if expired:
+        logger.info(f"Cleaned up {len(expired)} expired anonymous sessions, {len(_anonymous_sessions)} remaining")
+
+    # If still over max count, evict oldest
+    if len(_anonymous_sessions) > _SESSION_MAX_COUNT:
+        sorted_sessions = sorted(
+            _anonymous_sessions.items(),
+            key=lambda x: x[1].get("last_accessed", 0),
+        )
+        to_remove = len(_anonymous_sessions) - _SESSION_MAX_COUNT
+        for sid, _ in sorted_sessions[:to_remove]:
+            del _anonymous_sessions[sid]
+        logger.info(f"Evicted {to_remove} oldest anonymous sessions (over {_SESSION_MAX_COUNT} limit)")
 
 
 def _format_exception_message(e: Exception) -> str:
@@ -119,12 +154,21 @@ class ChatService:
     Uses Haiku for simple queries, Sonnet for complex ones.
     """
 
-    # Simple query patterns that Haiku can handle (no reasoning needed)
+    # Simple query patterns that Haiku can handle (direct tool calls, minimal reasoning)
     SIMPLE_QUERY_PATTERNS = [
-        r"^list\s+(all\s+)?(buckets?|projects?|channels?|users?)\.?$",
-        r"^show\s+(me\s+)?(all\s+)?(buckets?|projects?|channels?|users?)\.?$",
+        # List-type queries
+        r"^list\s+(all\s+)?(buckets?|projects?|channels?|users?|emails?|messages?|calendars?|events?|files?|docs?|tasks?)\.?$",
+        r"^show\s+(me\s+)?(the\s+)?(all\s+)?(buckets?|projects?|channels?|users?)\.?$",
         r"^what\s+(buckets?|projects?|channels?)\s+(do\s+i\s+have|are\s+there)\.?$",
-        r"^get\s+(all\s+)?(buckets?|projects?|channels?|users?)\.?$",
+        r"^get\s+(all\s+)?(buckets?|projects?|channels?|users?|emails?|messages?)\.?$",
+        # Email queries - "show me last N emails", "get my recent emails"
+        r"^(show\s+me\s+|get\s+|fetch\s+)?(my\s+)?(the\s+)?(last|recent|latest)\s+\d+\s+(emails?|messages?)\.?$",
+        r"^(show\s+me\s+|get\s+|fetch\s+)?(my\s+)?(the\s+)?inbox\.?$",
+        r"^(what|check)\s+(are\s+)?(my\s+)?(recent|latest|new)\s+(emails?|messages?)\.?$",
+        # Calendar queries
+        r"^(show\s+me\s+|get\s+|what\s+are\s+)?(my\s+)?(today'?s?|upcoming|next)\s+(meetings?|events?|calendar)\.?$",
+        # Simple Slack queries
+        r"^(show\s+me\s+|get\s+|read\s+)?(the\s+)?(last|recent)\s+\d+\s+messages?\s+(in|from)\s+#?\w+\.?$",
     ]
 
     # Model selection
@@ -158,10 +202,13 @@ class ChatService:
     def _select_model(self, message: str, has_context: bool) -> str:
         """Select the appropriate model based on query complexity.
 
-        NOTE: Always using Sonnet because Haiku doesn't support extended thinking,
-        which is required for good tool-use responses.
+        Haiku: Fast, good for simple tool calls (list, fetch, show N items)
+        Sonnet: Better reasoning, needed for complex queries and follow-ups
         """
-        # Always use Sonnet - Haiku doesn't support extended thinking
+        if self._is_simple_query(message, has_context):
+            logger.info(f"Using HAIKU for simple query: {message[:50]}...")
+            return self.MODEL_HAIKU
+
         logger.info(f"Using SONNET for query: {message[:50]}...")
         return self.MODEL_SONNET
 
@@ -255,8 +302,11 @@ class ChatService:
             )
 
         # Anonymous users: load from in-memory store
+        _cleanup_expired_sessions()
         if session_id in _anonymous_sessions:
-            return _anonymous_sessions[session_id].copy()
+            session_data = _anonymous_sessions[session_id]
+            session_data["last_accessed"] = time.time()
+            return session_data["messages"].copy()
 
         return []
 
@@ -265,7 +315,10 @@ class ChatService:
         # Keep only last N messages to prevent memory bloat
         if len(messages) > _SESSION_MAX_MESSAGES:
             messages = messages[-_SESSION_MAX_MESSAGES:]
-        _anonymous_sessions[session_id] = messages
+        _anonymous_sessions[session_id] = {
+            "messages": messages,
+            "last_accessed": time.time(),
+        }
 
     # =========================================================================
     # SYSTEM PROMPT & TOOLS
@@ -275,8 +328,13 @@ class ChatService:
         """Get available tools from MCP server with caching."""
         return await mcp_service.get_cached_tools(datasource)
 
-    def _create_system_prompt(self, datasource: str) -> str:
-        """Create system prompt for Claude using centralized prompts."""
+    def _create_system_prompt(self, datasource: str, query: str = "") -> str:
+        """Create system prompt for Claude using centralized prompts.
+
+        Args:
+            datasource: The datasource being queried
+            query: The user's query (unused - classifier disabled for now)
+        """
         from app.connectors import get_connector
         from app.core.prompts import Prompts
 
@@ -350,7 +408,7 @@ class ChatService:
         messages.append(user_message)
 
         tools = await self._get_tools(datasource)
-        system_prompt = self._create_system_prompt(datasource)
+        system_prompt = self._create_system_prompt(datasource, message)
 
         # Let Claude handle everything
         response_text, tool_calls = await self._call_claude(
@@ -425,9 +483,9 @@ class ChatService:
         messages.append(user_message)
 
         tools = await self._get_tools(datasource)
-        system_prompt = self._create_system_prompt(datasource)
+        system_prompt = self._create_system_prompt(datasource, message)
 
-        # Let Claude handle everything with streaming
+        # Let Claude handle everything with streaming (no forced tool_choice - let Claude decide)
         logger.info(f"Using {model} for this query")
         yield {"type": "thinking", "content": "Analyzing your request..."}
 
@@ -477,7 +535,7 @@ class ChatService:
     ) -> tuple[str, List[dict]]:
         """Call Claude API with tool support (non-streaming)."""
         tool_calls_made = []
-        max_iterations = 25
+        max_iterations = 10
         recent_tool_calls = []
 
         for iteration in range(max_iterations):
@@ -582,9 +640,16 @@ class ChatService:
         credential_session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         db: Optional[AsyncSession] = None,
+        tool_choice: Optional[dict] = None,
     ) -> AsyncGenerator[str, None]:
-        """Call Claude API with streaming, extended thinking, and tool support."""
-        max_iterations = 25
+        """Call Claude API with streaming, extended thinking, and tool support.
+
+        Args:
+            tool_choice: Optional dict to force a specific tool. Use {"type": "tool", "name": "tool_name"}
+                         to force Claude to use a specific tool. None lets Claude decide freely.
+        """
+        # Limit iterations - balance between completion and speed
+        max_iterations = 5
         recent_tool_calls = []
 
         for iteration in range(max_iterations):
@@ -615,6 +680,10 @@ class ChatService:
                     }
                     if tools:
                         stream_params["tools"] = tools
+                    # Force specific tool on FIRST iteration only (if high confidence classification)
+                    if tool_choice and iteration == 0:
+                        stream_params["tool_choice"] = tool_choice
+                        logger.info(f"🎯 Forcing tool_choice: {tool_choice}")
                     # NOTE: Extended thinking disabled - causes issues with multi-turn tool use
                     # stream_params["thinking"] = {"type": "enabled", "budget_tokens": 4000}
 
@@ -740,10 +809,22 @@ class ChatService:
             parallel_results = await asyncio.gather(*[execute_tool_stream(t) for t in tool_use_blocks])
 
             # Collect results and yield completion events
+            # Truncate large results to speed up Claude's processing
+            MAX_TOOL_RESULT_CHARS = 15000  # ~3750 tokens, plenty for summaries
             tool_results = []
             for tool_use, result_dict, error in parallel_results:
+                content = result_dict.get('content', '')
+                content_len = len(content) if content else 0
+
+                # Truncate if too large
+                if content_len > MAX_TOOL_RESULT_CHARS:
+                    truncated_content = content[:MAX_TOOL_RESULT_CHARS] + f"\n\n[... truncated {content_len - MAX_TOOL_RESULT_CHARS} chars for speed ...]"
+                    result_dict = {**result_dict, "content": truncated_content}
+                    logger.info(f"📋 Tool result for {tool_use.name}: TRUNCATED {content_len} -> {MAX_TOOL_RESULT_CHARS} chars")
+                else:
+                    logger.info(f"📋 Tool result for {tool_use.name}: {content_len} chars - {content[:200]}...")
+
                 tool_results.append(result_dict)
-                logger.info(f"📋 Tool result for {tool_use.name}: {result_dict.get('content', '')[:200]}...")
                 if error:
                     yield {"type": "tool_end", "tool": tool_use.name, "success": False, "error": error}
                 else:

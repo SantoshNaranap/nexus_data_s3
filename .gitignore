@@ -55,6 +55,16 @@ dist-ssr/
 htmlcov/
 coverage/
 *.cover
+**/test-results/
+**/playwright-report/
+
+# Test result artifacts (auto-generated JSON files)
+*_test_results_*.json
+*_verification_*.json
+edge_case_results_*.json
+connector_test_results_*.json
+content_verification_*.json
+e2e_test_results_*.json
 
 # OS
 .DS_Store

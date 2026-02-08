@@ -246,25 +246,23 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
     SLACK = """
 SLACK-SPECIFIC GUIDELINES:
 
-**KEY TOOLS:**
-- `get_all_recent_messages(hours_ago)` - Get ALL recent messages (DMs + channels). Use for "catch me up", "what did I miss"
-- `search_messages(query, limit)` - Search all messages for keywords
-- `read_dm_with_user(user, limit)` - Read DM with a specific person (works with first names)
-- `read_messages(channel, limit)` - Read messages from a specific channel
-- `list_channels()` / `list_users()` / `list_dms()` - List available items
+**TOOL SELECTION - ONE TOOL, ONE CALL:**
+The backend classifies queries and provides a directive. Follow it exactly.
 
-**EXAMPLES:**
-- "What did I miss yesterday" → get_all_recent_messages(hours_ago=24)
-- "Catch me up on Slack" → get_all_recent_messages(hours_ago=24)
-- "Messages from Akash" → read_dm_with_user(user="Akash", limit=30)
-- "Search for API credentials" → search_messages(query="API credentials", limit=50)
-- "What's happening in #general" → read_messages(channel="general", limit=50)
+If no directive provided, use these rules:
+- Catch-up/summary requests → `get_all_recent_messages(hours_ago=N)`
+- Specific person → `read_dm_with_user(user="Name", limit=50)`
+- Search/topic → `search_messages(query="topic", limit=50)`
+- Specific channel → `read_messages(channel="name", limit=50)`
 
-**IMPORTANT:**
-- Use `get_all_recent_messages` for broad "catch me up" queries - don't loop through DMs individually
-- First names work for `read_dm_with_user` - no need to find user IDs first
-- Quote messages EXACTLY as returned - never modify content or add emojis
-- Never attribute messages to someone unless explicitly in the tool response
+**CRITICAL:**
+- Use ONE tool call per query - tools are comprehensive and parallelized
+- Don't list_channels or list_users first - tools handle lookups internally
+- Don't iterate through channels - bulk tools cover everything
+
+**RESPONSE:**
+- Quote messages EXACTLY as returned
+- Never attribute messages to someone unless explicitly in the data
 """
 
     GITHUB = """

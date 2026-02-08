@@ -10,9 +10,10 @@ import AgentActivityPanel from './AgentActivityPanel'
 interface ChatInterfaceProps {
   datasource: DataSource
   isConfigured: boolean
+  connectedAccount?: string | null
 }
 
-export default function ChatInterface({ datasource, isConfigured }: ChatInterfaceProps) {
+export default function ChatInterface({ datasource, isConfigured, connectedAccount }: ChatInterfaceProps) {
   const [showAgentPanel, setShowAgentPanel] = useState(true)
 
   const {
@@ -25,6 +26,7 @@ export default function ChatInterface({ datasource, isConfigured }: ChatInterfac
     agentSteps,
     thinkingContent,
     isActivelyThinking,
+    isInvestigating,
     handleSubmit,
     handleNewConversation,
     handleFollowUpClick,
@@ -41,6 +43,7 @@ export default function ChatInterface({ datasource, isConfigured }: ChatInterfac
           hasMessages={messages.length > 0}
           isStreaming={isStreaming}
           isConfigured={isConfigured}
+          connectedAccount={connectedAccount}
           onToggleAgentPanel={() => setShowAgentPanel(!showAgentPanel)}
           onNewConversation={handleNewConversation}
         />
@@ -57,6 +60,7 @@ export default function ChatInterface({ datasource, isConfigured }: ChatInterfac
             thinkingContent={thinkingContent}
             isActivelyThinking={isActivelyThinking}
             isStreaming={isStreaming}
+            isInvestigating={isInvestigating}
             onFollowUpClick={handleFollowUpClick}
           />
         )}

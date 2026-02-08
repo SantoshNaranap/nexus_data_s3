@@ -16,6 +16,8 @@ import type { DataSource } from './types'
 function AppContent() {
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(null)
   const [configuredDatasources, setConfiguredDatasources] = useState<Set<string>>(new Set())
+  const [expiredDatasources, setExpiredDatasources] = useState<Set<string>>(new Set())
+  const [connectedAccounts, setConnectedAccounts] = useState<Map<string, string | null>>(new Map())
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
   const { theme, toggleTheme } = useTheme()
   const { isAuthenticated } = useAuth()
@@ -25,21 +27,29 @@ function AppContent() {
     queryFn: datasourceApi.list,
   })
 
-  // Check which datasources already have credentials saved
+  // Check which datasources already have credentials saved and their health
   useEffect(() => {
     async function checkExistingCredentials() {
       if (!datasources || !isAuthenticated) return
 
       const configured = new Set<string>()
+      const expired = new Set<string>()
+      const accounts = new Map<string, string | null>()
 
-      // Check each datasource for existing credentials
+      // Check each datasource for existing credentials and token health
       await Promise.all(
         datasources.map(async (ds) => {
           try {
             const status = await credentialsApi.checkStatus(ds.id)
             if (status.configured) {
               configured.add(ds.id)
-              console.log(`[App] ${ds.id} already configured`)
+              accounts.set(ds.id, status.connected_account || null)
+              if (status.status === 'expired') {
+                expired.add(ds.id)
+                console.log(`[App] ${ds.id} token expired`)
+              } else {
+                console.log(`[App] ${ds.id} connected as ${status.connected_account || 'unknown'}`)
+              }
             }
           } catch (error) {
             console.error(`[App] Failed to check ${ds.id} credentials:`, error)
@@ -48,15 +58,47 @@ function AppContent() {
       )
 
       setConfiguredDatasources(configured)
+      setExpiredDatasources(expired)
+      setConnectedAccounts(accounts)
       console.log('[App] Configured datasources:', Array.from(configured))
-      // Note: "What You Missed" is NOT auto-loaded - user clicks it when ready
+      if (expired.size > 0) {
+        console.log('[App] Expired datasources:', Array.from(expired))
+      }
     }
 
     checkExistingCredentials()
+
+    // Refresh credential status every 2 minutes to catch token refreshes
+    const intervalId = setInterval(checkExistingCredentials, 2 * 60 * 1000)
+    return () => clearInterval(intervalId)
   }, [datasources, isAuthenticated])
 
-  const handleSelectDatasource = (datasource: DataSource) => {
+  const handleSelectDatasource = async (datasource: DataSource) => {
     setSelectedDatasource(datasource)
+
+    // Refresh this datasource's credential status when selected
+    // This catches cases where token was refreshed in the background
+    if (datasource.id && !['what_you_missed', 'all_sources'].includes(datasource.id)) {
+      try {
+        const status = await credentialsApi.checkStatus(datasource.id)
+        if (status.configured) {
+          setConfiguredDatasources(prev => new Set(prev).add(datasource.id))
+          setConnectedAccounts(prev => new Map(prev).set(datasource.id, status.connected_account || null))
+          if (status.status === 'expired') {
+            setExpiredDatasources(prev => new Set(prev).add(datasource.id))
+          } else {
+            // Token is valid - remove from expired set if it was there
+            setExpiredDatasources(prev => {
+              const updated = new Set(prev)
+              updated.delete(datasource.id)
+              return updated
+            })
+          }
+        }
+      } catch (error) {
+        console.error(`[App] Failed to refresh ${datasource.id} status:`, error)
+      }
+    }
   }
 
   const handleSaveCredentials = async (
@@ -93,6 +135,7 @@ function AppContent() {
         onSelectDatasource={handleSelectDatasource}
         onOpenSettings={() => setSettingsPanelOpen(true)}
         configuredDatasources={configuredDatasources}
+        expiredDatasources={expiredDatasources}
         isLoading={isLoading}
       />
 
@@ -103,6 +146,7 @@ function AppContent() {
         onClose={() => setSettingsPanelOpen(false)}
         onSave={handleSaveCredentials}
         configuredDatasources={configuredDatasources}
+        expiredDatasources={expiredDatasources}
       />
 
       <div className="flex-1 flex flex-col">
@@ -154,7 +198,7 @@ function AppContent() {
         {selectedDatasource?.id === 'what_you_missed' ? (
           <WhatYouMissedDashboard />
         ) : selectedDatasource ? (
-          <ChatInterface datasource={selectedDatasource} isConfigured={configuredDatasources.has(selectedDatasource.id)} />
+          <ChatInterface datasource={selectedDatasource} isConfigured={configuredDatasources.has(selectedDatasource.id)} connectedAccount={connectedAccounts.get(selectedDatasource.id)} />
         ) : (
           <div className="flex-1 flex items-center justify-center p-8 bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
             <div className="text-center max-w-3xl">

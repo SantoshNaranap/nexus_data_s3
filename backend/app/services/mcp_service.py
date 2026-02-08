@@ -3,10 +3,11 @@
 import os
 import asyncio
 import time
-import hashlib
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any, List
 import logging
 from contextlib import asynccontextmanager
@@ -21,24 +22,273 @@ from app.connectors import (
     get_connector,
     get_all_connectors,
     get_available_datasources as registry_get_available_datasources,
-    get_connector_env,
-    get_cacheable_tools,
     get_credential_env_mapping,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CONNECTION POOLING - Reuse MCP subprocess connections to save 200-500ms/call
+# =============================================================================
+
+@dataclass
+class PooledConnection:
+    """A reusable MCP connection backed by a subprocess."""
+    session: ClientSession
+    stdio_context: Any  # The stdio_client context manager
+    session_context: Any  # The ClientSession context manager
+    read_stream: Any
+    write_stream: Any
+    created_at: float
+    last_used: float
+    datasource: str
+    pool_key: str
+    in_use: bool = False
+
+
+class MCPConnectionPool:
+    """
+    Reuses MCP subprocess connections instead of creating new ones.
+    Saves 200-500ms per tool call by avoiding subprocess spawn overhead.
+    """
+
+    def __init__(self, max_per_key: int = 3, idle_timeout: float = 300.0):
+        self._pools: Dict[str, List[PooledConnection]] = defaultdict(list)
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._max_per_key = max_per_key
+        self._idle_timeout = idle_timeout
+        self._cleanup_task: Optional[asyncio.Task] = None
+
+    def _get_lock(self, key: str) -> asyncio.Lock:
+        """Get or create a lock for a pool key."""
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
+
+    async def acquire(
+        self,
+        datasource: str,
+        pool_key: str,
+        server_params: StdioServerParameters,
+    ) -> PooledConnection:
+        """Get a connection from pool, or create a new one."""
+        lock = self._get_lock(pool_key)
+
+        async with lock:
+            pool = self._pools[pool_key]
+            now = time.time()
+
+            # Try to reuse an idle connection
+            for conn in pool:
+                if not conn.in_use and (now - conn.last_used) < self._idle_timeout:
+                    conn.in_use = True
+                    conn.last_used = now
+                    logger.info(f"♻️ Reusing pooled connection for {pool_key}")
+                    return conn
+
+            # Evict stale connections
+            stale = [c for c in pool if not c.in_use and (now - c.last_used) >= self._idle_timeout]
+            for conn in stale:
+                pool.remove(conn)
+                await self._close_connection(conn)
+
+            # Create new connection
+            logger.info(f"🆕 Creating new pooled connection for {pool_key}")
+            conn = await self._create_connection(datasource, pool_key, server_params)
+            pool.append(conn)
+            return conn
+
+    async def release(self, conn: PooledConnection):
+        """Return a connection to the pool for reuse."""
+        lock = self._get_lock(conn.pool_key)
+        async with lock:
+            conn.in_use = False
+            conn.last_used = time.time()
+
+            # If pool is over capacity, close this connection
+            pool = self._pools[conn.pool_key]
+            idle_count = sum(1 for c in pool if not c.in_use)
+            if idle_count > self._max_per_key:
+                pool.remove(conn)
+                await self._close_connection(conn)
+
+    async def discard(self, conn: PooledConnection):
+        """Remove a broken connection from the pool and close it."""
+        lock = self._get_lock(conn.pool_key)
+        async with lock:
+            pool = self._pools[conn.pool_key]
+            if conn in pool:
+                pool.remove(conn)
+        await self._close_connection(conn)
+
+    async def _create_connection(
+        self,
+        datasource: str,
+        pool_key: str,
+        server_params: StdioServerParameters,
+    ) -> PooledConnection:
+        """Create a new MCP connection by spawning a subprocess."""
+        # Manually enter context managers so we can keep them alive
+        stdio_ctx = stdio_client(server_params)
+        read_stream, write_stream = await stdio_ctx.__aenter__()
+
+        session_ctx = ClientSession(read_stream, write_stream)
+        session = await session_ctx.__aenter__()
+        await session.initialize()
+
+        now = time.time()
+        return PooledConnection(
+            session=session,
+            stdio_context=stdio_ctx,
+            session_context=session_ctx,
+            read_stream=read_stream,
+            write_stream=write_stream,
+            created_at=now,
+            last_used=now,
+            datasource=datasource,
+            pool_key=pool_key,
+            in_use=True,
+        )
+
+    async def _close_connection(self, conn: PooledConnection):
+        """Close a connection and its subprocess."""
+        try:
+            await conn.session_context.__aexit__(None, None, None)
+        except Exception as e:
+            logger.debug(f"Error closing session for {conn.pool_key}: {e}")
+        try:
+            await conn.stdio_context.__aexit__(None, None, None)
+        except Exception as e:
+            logger.debug(f"Error closing stdio for {conn.pool_key}: {e}")
+
+    async def close_all(self):
+        """Close all pooled connections. Call on shutdown."""
+        for pool_key, pool in self._pools.items():
+            for conn in pool:
+                await self._close_connection(conn)
+            pool.clear()
+        self._pools.clear()
+        logger.info("Closed all pooled MCP connections")
+
+    def stats(self) -> dict:
+        """Get pool statistics."""
+        total = sum(len(p) for p in self._pools.values())
+        in_use = sum(sum(1 for c in p if c.in_use) for p in self._pools.values())
+        return {"total": total, "in_use": in_use, "idle": total - in_use, "keys": len(self._pools)}
+
+
+# Global connection pool instance
+_connection_pool = MCPConnectionPool(max_per_key=3, idle_timeout=300.0)
+
+
+def _write_google_workspace_credentials(credentials: Dict[str, Any]) -> Optional[str]:
+    """
+    Write Google OAuth credentials to workspace-mcp's expected location.
+
+    The workspace-mcp connector expects credentials at:
+    ~/.google_workspace_mcp/credentials/{email}.json
+
+    Returns the email if successful, None if failed.
+    """
+    try:
+        email = credentials.get("google_email")
+        if not email:
+            logger.warning("No google_email in credentials, cannot write to workspace-mcp location")
+            return None
+
+        # Build the credential file path
+        home_dir = os.path.expanduser("~")
+        creds_dir = os.path.join(home_dir, ".google_workspace_mcp", "credentials")
+        os.makedirs(creds_dir, exist_ok=True)
+
+        creds_file = os.path.join(creds_dir, f"{email}.json")
+
+        # Build the credentials in workspace-mcp expected format
+        workspace_creds = {
+            "token": credentials.get("google_access_token"),
+            "refresh_token": credentials.get("google_refresh_token"),
+            "token_uri": credentials.get("token_uri", "https://oauth2.googleapis.com/token"),
+            "client_id": credentials.get("client_id"),
+            "client_secret": credentials.get("client_secret"),
+            "scopes": credentials.get("scopes", []),
+            "expiry": credentials.get("expires_at"),
+        }
+
+        # Write to file
+        with open(creds_file, "w") as f:
+            json.dump(workspace_creds, f, indent=2)
+
+        logger.info(f"Wrote Google Workspace credentials for {email} to {creds_file}")
+        return email
+
+    except Exception as e:
+        logger.error(f"Failed to write Google Workspace credentials: {e}")
+        return None
+
+
+async def _get_google_email_for_user(
+    user_id: Optional[str],
+    session_id: Optional[str],
+    db: Optional[Any],
+) -> Optional[str]:
+    """
+    Get the Google email for a user from their stored OAuth credentials.
+
+    This is needed because Google Workspace tools require user_google_email parameter,
+    and we need to inject it from the user's OAuth credentials, not from global config.
+
+    Priority:
+    1. User's OAuth credentials (from database)
+    2. settings.user_google_email (only if no user context)
+
+    Returns the email if found, None otherwise.
+    """
+    try:
+        # Get user credentials from database
+        credentials = None
+        if user_id and db:
+            credentials = await credential_service.get_credentials(
+                datasource="google_workspace",
+                db=db,
+                user_id=user_id,
+            )
+            if credentials:
+                email = credentials.get("google_email")
+                if email:
+                    logger.info(f"Using OAuth email for user {user_id[:8]}...: {email}")
+                    return email
+                else:
+                    logger.warning(f"User {user_id[:8]}... has Google credentials but no google_email field")
+        elif session_id:
+            credentials = await credential_service.get_credentials(
+                datasource="google_workspace",
+                session_id=session_id,
+            )
+            if credentials:
+                email = credentials.get("google_email")
+                if email:
+                    logger.info(f"Using OAuth email for session {session_id[:8]}...: {email}")
+                    return email
+
+        # Only fallback to settings if NO user credentials exist
+        # (i.e., user hasn't connected Google yet, dev/test mode)
+        if not credentials and settings.user_google_email:
+            logger.info(f"No user OAuth credentials, using settings.user_google_email: {settings.user_google_email}")
+            return settings.user_google_email
+
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get Google email for user: {e}")
+        # Don't fall back to settings on error - that could cause wrong email to be used
+        return None
+
 
 # Cache for tools to avoid repeated list_tools calls
 TOOLS_CACHE: Dict[str, Dict[str, Any]] = {}  # {datasource: {"tools": [...], "timestamp": float}}
 TOOLS_CACHE_TTL = 300  # 5 minutes TTL for tool cache
 TOOLS_CACHE_MAX_SIZE = 50  # Max datasources to cache (prevents unbounded growth)
 TOOLS_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to tools cache
-
-# Result cache for repeated queries (short TTL for freshness)
-RESULT_CACHE: Dict[str, Dict[str, Any]] = {}  # {cache_key: {"result": [...], "timestamp": float}}
-RESULT_CACHE_TTL = 30  # 30 seconds - short TTL for fresh data
-RESULT_CACHE_MAX_SIZE = 100  # Max cached results
-RESULT_CACHE_LOCK = asyncio.Lock()  # Thread-safe access to result cache
 
 # Schema cache for MySQL tables (longer TTL - schemas don't change often)
 SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}  # {table_name: {"columns": [...], "timestamp": float}}
@@ -362,7 +612,13 @@ class MCPService:
             logger.error(f"Connection error getting tools for {datasource}: {e}")
             return []
         except ValueError as e:
-            logger.error(f"Invalid datasource configuration for {datasource}: {e}")
+            # For OAuth-required datasources, return static tool definitions
+            # so Claude knows what tools are available even without credentials
+            logger.warning(f"Cannot connect to {datasource} for tools (OAuth required): {e}")
+            static_tools = self._get_static_tools_for_oauth_datasource(datasource)
+            if static_tools:
+                logger.info(f"Using {len(static_tools)} static tools for {datasource}")
+                return static_tools
             return []
 
     async def prewarm_connections(self, datasources: List[str] = None):
@@ -390,7 +646,67 @@ class MCPService:
         logger.info(f"🔥 Pre-warming completed in {elapsed:.2f}s")
 
     # Datasources that require per-user OAuth (no fallback to default credentials)
-    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira"}
+    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira", "google_workspace"}
+
+    def _get_static_tools_for_oauth_datasource(self, datasource: str) -> List[dict]:
+        """
+        Return static tool definitions for OAuth-required datasources.
+        This allows Claude to know what tools are available even when
+        credentials aren't available for connecting to the server.
+        """
+        # GitHub tools (Official GitHub MCP Server v0.29.0)
+        if datasource.lower() == "github":
+            return [
+                {"name": "get_me", "description": "Get the authenticated user's profile information", "input_schema": {"type": "object", "properties": {}}},
+                {"name": "search_repositories", "description": "Search for repositories. Use 'user:USERNAME' to find a user's repos", "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}}, "required": ["query"]}},
+                {"name": "get_file_contents", "description": "Get contents of a file from a repository", "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "path": {"type": "string"}}, "required": ["owner", "repo", "path"]}},
+                {"name": "list_issues", "description": "List issues in a repository", "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "state": {"type": "string", "enum": ["open", "closed", "all"]}}, "required": ["owner", "repo"]}},
+                {"name": "list_pull_requests", "description": "List pull requests in a repository", "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "state": {"type": "string", "enum": ["open", "closed", "all"]}}, "required": ["owner", "repo"]}},
+                {"name": "search_issues", "description": "Search for issues across repositories", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+                {"name": "search_code", "description": "Search for code across repositories", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+                {"name": "list_branches", "description": "List branches in a repository", "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}}, "required": ["owner", "repo"]}},
+                {"name": "list_commits", "description": "List commits in a repository", "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}}, "required": ["owner", "repo"]}},
+            ]
+
+        # Slack tools (consolidated)
+        if datasource.lower() == "slack":
+            return [
+                {"name": "find_messages", "description": "Find Slack messages. Provide user, channel, query, or combination. Smart routing picks the best strategy.", "input_schema": {"type": "object", "properties": {"user": {"type": "string", "description": "Person's name"}, "channel": {"type": "string", "description": "Channel name"}, "query": {"type": "string", "description": "Search keyword"}, "dm_with": {"type": "boolean", "description": "Read DM conversation with user"}, "hours_ago": {"type": "integer", "default": 48}, "limit": {"type": "integer", "default": 50}}}},
+                {"name": "get_slack_summary", "description": "Get summary of ALL recent Slack activity across DMs and channels. Use for 'catch me up', 'what did I miss'.", "input_schema": {"type": "object", "properties": {"hours_ago": {"type": "integer", "default": 24}}}},
+                {"name": "list_channels", "description": "List all Slack channels", "input_schema": {"type": "object", "properties": {}}},
+                {"name": "list_users", "description": "List all Slack users in the workspace", "input_schema": {"type": "object", "properties": {}}},
+                {"name": "send_message", "description": "Send a message to a channel", "input_schema": {"type": "object", "properties": {"channel": {"type": "string"}, "text": {"type": "string"}}, "required": ["channel", "text"]}},
+                {"name": "send_dm", "description": "Send a direct message to a user", "input_schema": {"type": "object", "properties": {"user": {"type": "string"}, "text": {"type": "string"}}, "required": ["user", "text"]}},
+            ]
+
+        # JIRA tools
+        if datasource.lower() == "jira":
+            return [
+                {"name": "list_projects", "description": "List all JIRA projects", "input_schema": {"type": "object", "properties": {}}},
+                {"name": "query_jira", "description": "Natural language query for JIRA issues", "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Natural language query"}}, "required": ["query"]}},
+                {"name": "get_issue", "description": "Get details of a specific issue", "input_schema": {"type": "object", "properties": {"issue_key": {"type": "string"}}, "required": ["issue_key"]}},
+                {"name": "search_issues", "description": "Search issues with JQL", "input_schema": {"type": "object", "properties": {"jql": {"type": "string"}}, "required": ["jql"]}},
+            ]
+
+        # Google Workspace tools (must match actual MCP server tool names)
+        if datasource.lower() == "google_workspace":
+            return [
+                {"name": "list_calendars", "description": "List calendars accessible to the user", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}}, "required": ["user_google_email"]}},
+                {"name": "get_events", "description": "Get calendar events from a specified calendar", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "calendar_id": {"type": "string"}, "time_min": {"type": "string"}, "time_max": {"type": "string"}}, "required": ["user_google_email"]}},
+                {"name": "create_event", "description": "Create a new calendar event", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "summary": {"type": "string"}, "start_time": {"type": "string"}, "end_time": {"type": "string"}}, "required": ["user_google_email", "summary", "start_time", "end_time"]}},
+                {"name": "search_drive_files", "description": "Search for files in Google Drive", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "query": {"type": "string"}}, "required": ["user_google_email"]}},
+                {"name": "get_drive_file_content", "description": "Get content of a Google Drive file by ID", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "file_id": {"type": "string"}}, "required": ["user_google_email", "file_id"]}},
+                {"name": "search_gmail_messages", "description": "Search messages in Gmail based on a query. Returns message IDs, subjects, senders, and snippets. The query parameter uses Gmail search syntax (e.g. 'from:person', 'subject:topic', 'newer_than:7d').", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "query": {"type": "string", "description": "Gmail search query. Examples: 'from:krishnan', 'newer_than:7d', 'subject:meeting'. Required."}, "max_results": {"type": "integer"}}, "required": ["user_google_email", "query"]}},
+                {"name": "get_gmail_message_content", "description": "Get full content (subject, sender, recipients, body) of a specific Gmail message by ID", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "message_id": {"type": "string"}}, "required": ["user_google_email", "message_id"]}},
+                {"name": "get_gmail_messages_content_batch", "description": "Get content of multiple Gmail messages in a single batch request", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "message_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["user_google_email", "message_ids"]}},
+                {"name": "send_gmail_message", "description": "Send an email using Gmail. Supports new emails and replies.", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["user_google_email", "to", "subject", "body"]}},
+                {"name": "get_doc_content", "description": "Get content of a Google Doc by document ID", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "document_id": {"type": "string"}}, "required": ["user_google_email", "document_id"]}},
+                {"name": "read_sheet_values", "description": "Read values from a Google Sheet range", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"}, "range": {"type": "string"}}, "required": ["user_google_email", "spreadsheet_id", "range"]}},
+                {"name": "list_tasks", "description": "List all tasks in a specific task list", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}}, "required": ["user_google_email"]}},
+                {"name": "create_task", "description": "Create a new task in a task list", "input_schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "title": {"type": "string"}}, "required": ["user_google_email", "title"]}},
+            ]
+
+        return []
 
     async def _get_connector_env(
         self,
@@ -438,13 +754,51 @@ class MCPService:
             user_credentials = None
             logger.info(f"_get_connector_env: no user_id or session_id, credentials=None")
 
-        # For OAuth-required datasources, user MUST have their own credentials
+        # For OAuth-required datasources, user should have their own credentials,
+        # but we can fall back to default env credentials if they exist (dev/test mode)
         if is_oauth_required:
             if not user_credentials:
-                raise ValueError(
-                    f"{datasource} requires you to connect your account via OAuth. "
-                    f"Please go to Settings and click 'Connect with {datasource}'."
-                )
+                # Check if default credentials exist in environment
+                default_env = connector.get_default_env_from_settings(settings)
+                has_default_credentials = default_env and any(v for v in default_env.values() if v)
+
+                if has_default_credentials:
+                    logger.info(f"Using default env credentials for {datasource} (no user OAuth, fallback mode)")
+                    default_env.update(connector.additional_env)
+                    return default_env
+                else:
+                    raise ValueError(
+                        f"{datasource} requires you to connect your account via OAuth. "
+                        f"Please go to Settings and click 'Connect with {datasource}'."
+                    )
+
+            # Special handling for Google Workspace: write credentials to workspace-mcp location
+            if datasource.lower() == "google_workspace":
+                email = _write_google_workspace_credentials(user_credentials)
+                if email:
+                    # Start with default settings (contains GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET)
+                    # These are needed by the MCP connector even when using user OAuth tokens
+                    env = connector.get_default_env_from_settings(settings)
+
+                    # Override with user-specific settings
+                    env["USER_GOOGLE_EMAIL"] = email
+
+                    # Also pass client_id/client_secret from user credentials if available
+                    # (they're stored with different key names in the database)
+                    if user_credentials.get("client_id"):
+                        env["GOOGLE_OAUTH_CLIENT_ID"] = user_credentials["client_id"]
+                    if user_credentials.get("client_secret"):
+                        env["GOOGLE_OAUTH_CLIENT_SECRET"] = user_credentials["client_secret"]
+
+                    env.update(connector.additional_env)
+                    logger.info(f"Using Google OAuth credentials for {email} (client_id present: {bool(env.get('GOOGLE_OAUTH_CLIENT_ID'))})")
+                    return env
+                else:
+                    raise ValueError(
+                        "Google Workspace OAuth credentials missing email. "
+                        "Please reconnect via Settings."
+                    )
+
             # Only use user credentials (no defaults)
             env = connector.get_env_from_credentials(user_credentials)
             env.update(connector.additional_env)
@@ -462,6 +816,61 @@ class MCPService:
             logger.info(f"Using {credential_type} credentials for {datasource}")
 
         return env
+
+    def _inject_docker_env_vars(self, args: List[str], env_vars: dict) -> List[str]:
+        """
+        Inject environment variables as -e KEY=VALUE flags into Docker run args.
+
+        Docker containers don't inherit environment variables from the parent process,
+        so we need to explicitly pass them via -e flags.
+
+        Args:
+            args: Original docker run arguments
+            env_vars: Environment variables to inject
+
+        Returns:
+            Modified args list with -e flags inserted before the image name
+        """
+        if not env_vars:
+            return args
+
+        # Find the image name (last arg that doesn't start with -)
+        # Insert -e flags right before the image name
+        new_args = []
+        image_index = -1
+
+        # Find where the image name is (typically after all flags)
+        for i, arg in enumerate(args):
+            if arg == "run":
+                continue
+            # Skip flag values
+            if i > 0 and args[i-1] in ["-e", "--env", "-v", "--volume", "-p", "--publish", "--name"]:
+                continue
+            # If it doesn't start with - and isn't a flag value, it's likely the image
+            if not arg.startswith("-") and "/" in arg or ":" in arg or "." in arg:
+                image_index = i
+                break
+            # Also check for image names without special chars (like 'postgres')
+            if not arg.startswith("-") and i > 0 and not args[i-1].startswith("-"):
+                image_index = i
+                break
+
+        if image_index == -1:
+            # Couldn't find image, just append to end before last element
+            image_index = len(args) - 1
+
+        # Build new args: everything before image, then -e flags, then image and rest
+        new_args = list(args[:image_index])
+
+        # Add -e flags for each env var
+        for key, value in env_vars.items():
+            new_args.extend(["-e", f"{key}={value}"])
+
+        # Add the rest (image name and any commands after)
+        new_args.extend(args[image_index:])
+
+        logger.info(f"Docker args with env vars: {' '.join(new_args[:10])}...")
+        return new_args
 
     @asynccontextmanager
     async def get_client(
@@ -492,11 +901,20 @@ class MCPService:
         # Prioritizes user_id over session_id
         connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
 
+        # For Docker-based connectors, inject env vars as -e flags
+        # Docker doesn't inherit subprocess env vars into the container
+        if command == "docker" and "run" in args:
+            args = self._inject_docker_env_vars(args, connector_env)
+            # Don't pass connector_env to subprocess since it's now in docker args
+            final_env = os.environ.copy()
+        else:
+            final_env = {**os.environ.copy(), **connector_env}
+
         # Create server parameters
         server = StdioServerParameters(
             command=command,
             args=args,
-            env={**os.environ.copy(), **connector_env},
+            env=final_env,
         )
 
         # Create client session
@@ -633,58 +1051,22 @@ class MCPService:
                 await breaker.record_failure(fallback_error)
                 raise
 
-    def _get_cache_key(self, datasource: str, tool_name: str, arguments: dict) -> str:
-        """Generate a cache key for result caching."""
-        args_str = json.dumps(arguments, sort_keys=True)
-        key_str = f"{datasource}:{tool_name}:{args_str}"
-        return hashlib.md5(key_str.encode()).hexdigest()
+    def _build_server_params(self, datasource: str, connector_env: dict) -> StdioServerParameters:
+        """Build StdioServerParameters for a datasource with the given env."""
+        connector = get_connector(datasource)
+        if not connector:
+            raise ValueError(f"Unknown data source: {datasource}")
 
-    async def _check_result_cache(self, cache_key: str, force_refresh: bool = False) -> Optional[List[Any]]:
-        """Check if we have a cached result (thread-safe)."""
-        async with RESULT_CACHE_LOCK:
-            if force_refresh:
-                # User requested fresh data, skip cache
-                if cache_key in RESULT_CACHE:
-                    del RESULT_CACHE[cache_key]
-                return None
+        command, args = connector.get_server_command()
 
-            if cache_key in RESULT_CACHE:
-                cached = RESULT_CACHE[cache_key]
-                if time.time() - cached["timestamp"] < RESULT_CACHE_TTL:
-                    return cached["result"]
-                else:
-                    # Expired, remove it
-                    del RESULT_CACHE[cache_key]
-            return None
+        # For Docker-based connectors, inject env vars as -e flags
+        if command == "docker" and "run" in args:
+            args = self._inject_docker_env_vars(args, connector_env)
+            final_env = os.environ.copy()
+        else:
+            final_env = {**os.environ.copy(), **connector_env}
 
-    def should_force_refresh(self, message: str) -> bool:
-        """
-        Check if user is requesting fresh/updated data.
-        Detects keywords like 'refresh', 'update', 'latest', 'new', 'current', etc.
-        """
-        refresh_keywords = [
-            "refresh", "update", "reload", "fetch",
-            "latest", "newest", "current", "now",
-            "fresh", "new data", "sync", "resync",
-            "check again", "look again", "re-check",
-        ]
-        message_lower = message.lower()
-        return any(keyword in message_lower for keyword in refresh_keywords)
-
-    async def _store_result_cache(self, cache_key: str, result: List[Any]):
-        """Store a result in the cache (thread-safe)."""
-        async with RESULT_CACHE_LOCK:
-            # Prune cache if too large
-            if len(RESULT_CACHE) >= RESULT_CACHE_MAX_SIZE:
-                # Remove oldest entries
-                sorted_keys = sorted(RESULT_CACHE.keys(), key=lambda k: RESULT_CACHE[k]["timestamp"])
-                for key in sorted_keys[:20]:  # Remove 20 oldest
-                    del RESULT_CACHE[key]
-
-            RESULT_CACHE[cache_key] = {
-                "result": result,
-                "timestamp": time.time(),
-            }
+        return StdioServerParameters(command=command, args=args, env=final_env)
 
     async def call_tool_fast(
         self,
@@ -697,99 +1079,118 @@ class MCPService:
         force_refresh: bool = False,
     ) -> List[Any]:
         """
-        FAST tool call with result caching.
-        Caches results for repeated queries (30s TTL).
-        Uses fresh connections per call (MCP stdio doesn't support persistent connections well).
-
-        Args:
-            force_refresh: If True, bypasses cache and fetches fresh data
+        Tool call using connection pooling for speed.
+        Reuses MCP subprocess connections to save 200-500ms per call.
         """
         start_time = time.time()
 
         # PROACTIVE TOKEN REFRESH - check if token is about to expire BEFORE making request
-        # This avoids the error-then-retry pattern and provides smoother UX
         if user_id and db:
             await self._check_and_refresh_token_if_expiring(datasource, user_id, db)
 
-        # CHECK CACHE FIRST (instant return if cached)
-        # Get cacheable tools from connector registry
-        cacheable_tools = get_cacheable_tools(datasource)
+        # ALWAYS inject user_google_email FOR GOOGLE WORKSPACE TOOLS from OAuth credentials
+        if datasource.lower() == "google_workspace":
+            email = await _get_google_email_for_user(user_id, session_id, db)
+            if email:
+                arguments = arguments.copy()
+                old_email = arguments.get("user_google_email", "(none)")
+                arguments["user_google_email"] = email
+                if old_email != email:
+                    logger.info(f"✅ Overriding user_google_email: '{old_email}' → '{email}' for {tool_name}")
+                else:
+                    logger.info(f"✅ Confirmed user_google_email: {email} for {tool_name}")
+            else:
+                logger.warning(f"⚠️ Could not find Google email for user, tool {tool_name} may fail")
 
-        cache_key = None
-        if tool_name in cacheable_tools:
-            cache_key = self._get_cache_key(datasource, tool_name, arguments)
-            cached_result = await self._check_result_cache(cache_key, force_refresh=force_refresh)
-            if cached_result is not None:
-                elapsed = time.time() - start_time
-                logger.info(f"CACHED result ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
-                return cached_result
-            elif force_refresh:
-                logger.info(f"Force refresh requested for {datasource}/{tool_name}")
+        # Build pool key and server params
+        connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
+        pool_key = f"{datasource}:{user_id or session_id or 'default'}"
+        server_params = self._build_server_params(datasource, connector_env)
 
-        # Use standard connection (MCP stdio doesn't support reuse well across tasks)
+        # Acquire pooled connection
+        conn = await _connection_pool.acquire(datasource, pool_key, server_params)
+
         try:
-            async with self.get_client(datasource, user_id, session_id, db=db) as session:
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments),
-                    timeout=MCP_TOOL_CALL_TIMEOUT
-                )
-                result_content = result.content if result else []
-                elapsed = time.time() - start_time
-                logger.info(f"⚡ FAST call_tool ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms")
+            result = await asyncio.wait_for(
+                conn.session.call_tool(tool_name, arguments),
+                timeout=MCP_TOOL_CALL_TIMEOUT,
+            )
+            result_content = result.content if result else []
+            elapsed = time.time() - start_time
+            logger.info(f"⚡ call_tool ({datasource}/{tool_name}) in {elapsed*1000:.0f}ms [pooled]")
 
-                # Check for OAuth token expiration and retry with refreshed token
-                if user_id and db and self._is_auth_error(result_content):
-                    logger.warning(f"Detected auth error in result for {datasource}, attempting token refresh...")
-                    refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
-                    if refreshed:
-                        # Retry the call with refreshed credentials
-                        logger.info(f"Retrying {datasource}/{tool_name} with refreshed token...")
-                        async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
-                            result = await asyncio.wait_for(
-                                retry_session.call_tool(tool_name, arguments),
-                                timeout=MCP_TOOL_CALL_TIMEOUT
-                            )
-                            result_content = result.content if result else []
-                            logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh")
+            # Check for OAuth token expiration and retry with refreshed token
+            if user_id and db and self._is_auth_error(result_content):
+                logger.warning(f"Detected auth error in result for {datasource}, attempting token refresh...")
+                # Discard old connection (has stale credentials) and retry with fresh one
+                await _connection_pool.discard(conn)
+                conn = None
 
-                # Store in cache for future requests
-                if cache_key:
-                    await self._store_result_cache(cache_key, result_content)
-
-                return result_content
-
-        except Exception as e:
-            # Check if exception is an auth error (e.g., 401, token expired)
-            # Use _is_auth_error_exception to handle TaskGroup/ExceptionGroup with nested exceptions
-            if user_id and db and self._is_auth_error_exception(e):
-                logger.warning(f"Detected auth error exception for {datasource}: {str(e)[:100]}...")
-                logger.info(f"Attempting token refresh for {datasource}...")
                 refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
                 if refreshed:
-                    # Retry the call with refreshed credentials
+                    logger.info(f"Retrying {datasource}/{tool_name} with refreshed token...")
+                    # Get fresh env and new connection
+                    connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
+                    server_params = self._build_server_params(datasource, connector_env)
+                    conn = await _connection_pool.acquire(datasource, pool_key, server_params)
+                    result = await asyncio.wait_for(
+                        conn.session.call_tool(tool_name, arguments),
+                        timeout=MCP_TOOL_CALL_TIMEOUT,
+                    )
+                    result_content = result.content if result else []
+                    logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh [pooled]")
+
+            return result_content
+
+        except Exception as e:
+            # Connection is likely broken — discard it
+            if conn:
+                await _connection_pool.discard(conn)
+                conn = None
+
+            error_msg = str(e)
+            if hasattr(e, 'exceptions'):
+                nested_errors = [str(nested) for nested in e.exceptions]
+                error_msg = "; ".join(nested_errors[:3])
+                logger.warning(f"ExceptionGroup for {datasource}/{tool_name}: {error_msg}")
+
+            # Check if exception is an auth error — try refresh and retry
+            if user_id and db and self._is_auth_error_exception(e):
+                logger.warning(f"Detected auth error exception for {datasource}: {error_msg[:100]}...")
+                refreshed = await self._try_refresh_oauth_token(datasource, user_id, db)
+                if refreshed:
                     logger.info(f"Retrying {datasource}/{tool_name} with refreshed token after exception...")
                     try:
-                        async with self.get_client(datasource, user_id, session_id, db=db) as retry_session:
-                            result = await asyncio.wait_for(
-                                retry_session.call_tool(tool_name, arguments),
-                                timeout=MCP_TOOL_CALL_TIMEOUT
-                            )
-                            result_content = result.content if result else []
-                            elapsed = time.time() - start_time
-                            logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded after token refresh in {elapsed*1000:.0f}ms")
-
-                            # Store in cache for future requests
-                            if cache_key:
-                                await self._store_result_cache(cache_key, result_content)
-
-                            return result_content
+                        connector_env = await self._get_connector_env(datasource, user_id, session_id, db=db)
+                        server_params = self._build_server_params(datasource, connector_env)
+                        conn = await _connection_pool.acquire(datasource, pool_key, server_params)
+                        result = await asyncio.wait_for(
+                            conn.session.call_tool(tool_name, arguments),
+                            timeout=MCP_TOOL_CALL_TIMEOUT,
+                        )
+                        result_content = result.content if result else []
+                        elapsed = time.time() - start_time
+                        logger.info(f"⚡ RETRY call_tool ({datasource}/{tool_name}) succeeded in {elapsed*1000:.0f}ms [pooled]")
+                        await _connection_pool.release(conn)
+                        return result_content
                     except Exception as retry_error:
+                        if conn:
+                            await _connection_pool.discard(conn)
                         logger.error(f"Retry after token refresh also failed: {retry_error}")
                         raise retry_error
                 else:
                     logger.error(f"Token refresh failed for {datasource}, re-raising original error")
-            # Re-raise the original exception if not an auth error or refresh failed
             raise
+
+        finally:
+            # Release connection back to pool (if not already discarded)
+            if conn:
+                await _connection_pool.release(conn)
+
+    async def shutdown(self):
+        """Shutdown the service and close all pooled connections."""
+        await _connection_pool.close_all()
+        logger.info("MCP service shut down")
 
     # ==================== Schema Caching for MySQL ====================
 

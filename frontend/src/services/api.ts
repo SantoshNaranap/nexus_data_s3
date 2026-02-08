@@ -30,6 +30,7 @@ export interface CredentialStatus {
   configured: boolean;
   status: 'connected' | 'expired' | 'disconnected';
   expires_at?: string;
+  connected_account?: string | null;
 }
 
 export const credentialsApi = {

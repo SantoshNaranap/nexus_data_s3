@@ -34,6 +34,51 @@ OAUTH_CONFIG = {
         "audience": "api.atlassian.com",
         "scopes": "read:jira-work read:jira-user write:jira-work offline_access",
     },
+    "google_workspace": {
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        # All scopes needed by the MCP connector (core tier)
+        "scopes": " ".join([
+            # Identity
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            # Gmail
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.labels",
+            # Calendar
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            # Drive
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive.file",
+            # Docs
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/documents.readonly",
+            # Sheets
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            # Slides/Presentations
+            "https://www.googleapis.com/auth/presentations",
+            "https://www.googleapis.com/auth/presentations.readonly",
+            # Forms
+            "https://www.googleapis.com/auth/forms.body",
+            "https://www.googleapis.com/auth/forms.body.readonly",
+            "https://www.googleapis.com/auth/forms.responses.readonly",
+            # Tasks
+            "https://www.googleapis.com/auth/tasks",
+            "https://www.googleapis.com/auth/tasks.readonly",
+            # Chat
+            "https://www.googleapis.com/auth/chat.spaces",
+            "https://www.googleapis.com/auth/chat.messages",
+            "https://www.googleapis.com/auth/chat.messages.readonly",
+        ]),
+    },
 }
 
 
@@ -75,6 +120,8 @@ class UserOAuthService:
             return bool(settings.github_client_id and settings.github_client_secret)
         elif ds == "jira":
             return bool(settings.jira_client_id and settings.jira_client_secret)
+        elif ds == "google_workspace":
+            return bool(settings.google_oauth_client_id and settings.google_oauth_client_secret)
         return False
 
     # ============ Slack OAuth ============
@@ -83,7 +130,9 @@ class UserOAuthService:
         """Generate Slack OAuth authorization URL for user."""
         redirect_uri = settings.slack_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/slack/oauth/callback"
+            # Use Slack-specific base URL if set, otherwise fall back to api_base_url
+            base_url = settings.slack_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/slack/oauth/callback"
 
         params = {
             "client_id": settings.slack_client_id,
@@ -97,7 +146,8 @@ class UserOAuthService:
         """Exchange Slack OAuth code for user tokens."""
         redirect_uri = settings.slack_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/slack/oauth/callback"
+            base_url = settings.slack_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/slack/oauth/callback"
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -139,7 +189,8 @@ class UserOAuthService:
         """Generate GitHub OAuth authorization URL for user."""
         redirect_uri = settings.github_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/github/oauth/callback"
+            base_url = settings.github_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/github/oauth/callback"
 
         params = {
             "client_id": settings.github_client_id,
@@ -153,7 +204,8 @@ class UserOAuthService:
         """Exchange GitHub OAuth code for tokens."""
         redirect_uri = settings.github_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/github/oauth/callback"
+            base_url = settings.github_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/github/oauth/callback"
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -204,7 +256,8 @@ class UserOAuthService:
         """Generate Jira OAuth authorization URL for user."""
         redirect_uri = settings.jira_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/jira/oauth/callback"
+            base_url = settings.jira_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/jira/oauth/callback"
 
         params = {
             "audience": OAUTH_CONFIG["jira"]["audience"],
@@ -221,7 +274,8 @@ class UserOAuthService:
         """Exchange Jira OAuth code for tokens."""
         redirect_uri = settings.jira_oauth_redirect_uri
         if not redirect_uri:
-            redirect_uri = f"{settings.api_base_url}/api/credentials/jira/oauth/callback"
+            base_url = settings.jira_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/jira/oauth/callback"
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -351,6 +405,140 @@ class UserOAuthService:
             logger.error(f"Error refreshing Jira token: {e}")
             return None
 
+    # ============ Google Workspace OAuth ============
+
+    def get_google_workspace_auth_url(self, state: str, user_id: str) -> str:
+        """Generate Google OAuth authorization URL for user."""
+        redirect_uri = settings.google_workspace_oauth_redirect_uri
+        if not redirect_uri:
+            base_url = settings.google_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/google_workspace/oauth/callback"
+
+        params = {
+            "client_id": settings.google_oauth_client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": OAUTH_CONFIG["google_workspace"]["scopes"],
+            "state": state,
+            "access_type": "offline",  # Request refresh token
+            "prompt": "consent",  # Force consent to get refresh token
+        }
+        return f"{OAUTH_CONFIG['google_workspace']['auth_url']}?{urlencode(params)}"
+
+    async def exchange_google_workspace_code(self, code: str) -> Dict[str, Any]:
+        """Exchange Google OAuth code for tokens."""
+        redirect_uri = settings.google_workspace_oauth_redirect_uri
+        if not redirect_uri:
+            base_url = settings.google_oauth_base_url or settings.api_base_url
+            redirect_uri = f"{base_url}/api/credentials/google_workspace/oauth/callback"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                OAUTH_CONFIG["google_workspace"]["token_url"],
+                data={
+                    "client_id": settings.google_oauth_client_id,
+                    "client_secret": settings.google_oauth_client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_google_user_info(self, access_token: str) -> Dict[str, Any]:
+        """Get Google user info."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def parse_google_workspace_credentials(
+        self, token_response: Dict[str, Any], user_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Parse Google OAuth response into credentials format.
+
+        Stores tokens in a format compatible with the Google Workspace MCP connector.
+        """
+        # Calculate token expiry time
+        expires_in = token_response.get("expires_in", 3600)
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+
+        return {
+            # Google OAuth tokens
+            "google_access_token": token_response.get("access_token"),
+            "google_refresh_token": token_response.get("refresh_token"),
+            "google_token_type": token_response.get("token_type", "Bearer"),
+            "google_id_token": token_response.get("id_token"),
+            # User info
+            "google_email": user_info.get("email"),
+            "google_name": user_info.get("name"),
+            "google_picture": user_info.get("picture"),
+            # Token metadata
+            "expires_at": expires_at,
+            "expires_in": expires_in,
+            "oauth_type": "user",
+            # Store client credentials for token refresh by MCP connector
+            "token_uri": OAUTH_CONFIG["google_workspace"]["token_url"],
+            "client_id": settings.google_oauth_client_id,
+            "client_secret": settings.google_oauth_client_secret,
+            "scopes": OAUTH_CONFIG["google_workspace"]["scopes"].split(),
+        }
+
+    async def refresh_google_token(self, refresh_token: str) -> Dict[str, Any]:
+        """Refresh Google OAuth access token using refresh token."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                OAUTH_CONFIG["google_workspace"]["token_url"],
+                data={
+                    "client_id": settings.google_oauth_client_id,
+                    "client_secret": settings.google_oauth_client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def refresh_google_credentials(self, current_credentials: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Refresh Google credentials using the stored refresh token."""
+        refresh_token = current_credentials.get("google_refresh_token")
+        if not refresh_token:
+            logger.warning("No refresh token available for Google credentials")
+            return None
+
+        try:
+            token_response = await self.refresh_google_token(refresh_token)
+
+            # Update credentials with new tokens
+            updated_credentials = current_credentials.copy()
+            updated_credentials["google_access_token"] = token_response.get("access_token")
+
+            # Update refresh token if a new one was provided (Google sometimes rotates)
+            if token_response.get("refresh_token"):
+                updated_credentials["google_refresh_token"] = token_response.get("refresh_token")
+
+            # Update token expiry time
+            expires_in = token_response.get("expires_in", 3600)
+            updated_credentials["expires_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            ).isoformat()
+            updated_credentials["expires_in"] = expires_in
+            updated_credentials["last_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+
+            logger.info("Successfully refreshed Google OAuth token")
+            return updated_credentials
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to refresh Google token: {e.response.status_code} - {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"Error refreshing Google token: {e}")
+            return None
+
     # ============ Generic Methods ============
 
     def get_auth_url(self, datasource: str, state: str, user_id: str) -> Optional[str]:
@@ -362,6 +550,8 @@ class UserOAuthService:
             return self.get_github_auth_url(state, user_id)
         elif ds == "jira":
             return self.get_jira_auth_url(state, user_id)
+        elif ds == "google_workspace":
+            return self.get_google_workspace_auth_url(state, user_id)
         return None
 
     async def exchange_code(self, datasource: str, code: str) -> Dict[str, Any]:
@@ -373,6 +563,8 @@ class UserOAuthService:
             return await self.exchange_github_code(code)
         elif ds == "jira":
             return await self.exchange_jira_code(code)
+        elif ds == "google_workspace":
+            return await self.exchange_google_workspace_code(code)
         raise ValueError(f"Unsupported datasource: {datasource}")
 
     async def process_oauth_response(self, datasource: str, token_response: Dict[str, Any]) -> Dict[str, Any]:
@@ -399,6 +591,13 @@ class UserOAuthService:
             if not sites:
                 raise ValueError("No Jira sites accessible with this token")
             return self.parse_jira_credentials(token_response, sites)
+
+        elif ds == "google_workspace":
+            access_token = token_response.get("access_token")
+            if not access_token:
+                raise ValueError("Google OAuth failed - no access token")
+            user_info = await self.get_google_user_info(access_token)
+            return self.parse_google_workspace_credentials(token_response, user_info)
 
         raise ValueError(f"Unsupported datasource: {datasource}")
 

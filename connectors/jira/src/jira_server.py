@@ -18,8 +18,6 @@ from jira.exceptions import JIRAError
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-from query_parser import JiraQueryParser
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-mcp-server")
@@ -32,7 +30,6 @@ jira_cloud_id = os.getenv("JIRA_CLOUD_ID", "")
 
 # Global client - lazily initialized
 _jira_client: Optional[JIRA] = None
-_query_parser: Optional[JiraQueryParser] = None
 _initialization_error: Optional[str] = None
 
 
@@ -43,7 +40,7 @@ def get_jira_client() -> JIRA:
     This allows the MCP server to start even if credentials are expired,
     and returns a clear error message when authentication fails.
     """
-    global _jira_client, _query_parser, _initialization_error
+    global _jira_client, _initialization_error
 
     # Return cached client if available
     if _jira_client is not None:
@@ -75,8 +72,6 @@ def get_jira_client() -> JIRA:
                 basic_auth=(jira_email, jira_api_token),
             )
 
-        # Initialize query parser
-        _query_parser = JiraQueryParser(_jira_client)
         logger.info("JIRA client initialized successfully")
         return _jira_client
 
@@ -94,14 +89,6 @@ def get_jira_client() -> JIRA:
         _initialization_error = f"JIRA_ERROR: Failed to connect to Jira - {str(e)}"
         logger.error(f"Unexpected error initializing Jira: {e}")
         raise JIRAError(_initialization_error)
-
-
-def get_query_parser() -> JiraQueryParser:
-    """Get the query parser, initializing the client if needed."""
-    global _query_parser
-    if _query_parser is None:
-        get_jira_client()  # This will initialize both
-    return _query_parser
 
 
 def handle_jira_error(e: Exception, operation: str) -> list[TextContent]:
@@ -144,48 +131,22 @@ async def list_tools() -> list[Tool]:
     """List all available JIRA tools."""
     return [
         Tool(
-            name="query_jira",
-            description="""RECOMMENDED: Query JIRA using natural language.
-
-This tool automatically:
-- Matches person names (e.g., "austin" → "Austin Prabu")
-- Matches project names (e.g., "oralia-v2" → project key "ORALIA")
-- Handles status filters ("open issues", "closed", "in progress")
-- Detects counts ("how many issues")
-- Generates and executes the correct JQL query
-
-Examples:
-- "What is austin working on in Oralia-v2?"
-- "How many open bugs are there?"
-- "Show me santosh's tasks"
-- "What's in the backlog?"
-
-Just pass the user's question as-is to this tool!""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language query about JIRA issues",
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
             name="search_issues",
             description="""Search for JIRA issues using JQL (JIRA Query Language).
 
-Common JQL examples:
-- Count open issues: 'status = Open' or 'status != Closed'
-- Issues by assignee: 'assignee = "John Doe"' or 'assignee in (user1, user2)'
-- Issues by project: 'project = PROJECTKEY'
-- Multiple conditions: 'project = PROJ AND status = "In Progress" AND assignee = currentUser()'
-- Recent updates: 'updated >= -7d' (last 7 days)
-- By priority: 'priority = High'
-- Unassigned: 'assignee is EMPTY'
+IMPORTANT: Always call list_projects FIRST to get the correct project key!
 
-Always start with 'project = PROJECTKEY' if you know the project.""",
+Common JQL examples:
+- All issues in a project: 'project = SH' (use exact project key from list_projects)
+- Open issues: 'project = SH AND status != Closed'
+- By status: 'project = SH AND status = "In Progress"'
+- By assignee: 'project = SH AND assignee = "John Doe"'
+- Multiple conditions: 'project = SH AND status = "In Progress" AND assignee = currentUser()'
+- Recent updates: 'project = SH AND updated >= -7d'
+- By priority: 'project = SH AND priority = High'
+- Unassigned: 'project = SH AND assignee is EMPTY'
+
+ALWAYS include 'project = PROJECTKEY' to filter to the correct project!""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -271,7 +232,16 @@ Always start with 'project = PROJECTKEY' if you know the project.""",
         ),
         Tool(
             name="list_projects",
-            description="List all JIRA projects accessible to the user. Use this FIRST to discover available project keys before searching for issues.",
+            description="""ALWAYS CALL THIS FIRST before searching issues!
+
+Lists all JIRA projects accessible to the user. Returns the project KEY (e.g., 'SH', 'ORALIA') and NAME (e.g., 'Sensi-Hire', 'Oralia-v2').
+
+WORKFLOW:
+1. Call list_projects to see available projects and their KEYS
+2. Match the user's request to the correct project KEY
+3. Use that KEY in search_issues JQL: 'project = KEY'
+
+Example: If user asks about "Sensi Hire" and list_projects shows {'key': 'SH', 'name': 'Sensi-Hire'}, use 'project = SH' in JQL.""",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -317,9 +287,7 @@ Always start with 'project = PROJECTKEY' if you know the project.""",
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls with proper error handling."""
     try:
-        if name == "query_jira":
-            return await handle_query_jira(arguments)
-        elif name == "search_issues":
+        if name == "search_issues":
             return await handle_search_issues(arguments)
         elif name == "get_issue":
             return await handle_get_issue(arguments)
@@ -339,57 +307,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return handle_jira_error(e, name)
     except Exception as e:
         return handle_jira_error(e, name)
-
-
-async def handle_query_jira(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle natural language JIRA queries."""
-    if "query" not in arguments or not arguments["query"]:
-        return [TextContent(
-            type="text",
-            text='ERROR: Missing required parameter "query". Provide a natural language query about JIRA issues.'
-        )]
-
-    query = arguments["query"]
-    logger.info(f"Processing natural language query: {query}")
-
-    # Get client (lazy initialization)
-    client = get_jira_client()
-    parser = get_query_parser()
-
-    # Parse the query
-    parsed = parser.parse(query)
-    logger.info(f"Parsed query: {json.dumps(parsed, indent=2)}")
-
-    jql = parsed["jql"]
-    is_count = parsed["is_count"]
-    matched_entities = parsed["matched_entities"]
-
-    # Execute the JQL query
-    max_results = 50 if not is_count else 100
-    issues = client.search_issues(jql, maxResults=max_results, fields="key,summary,status,assignee")
-
-    # Format results
-    results = []
-    for issue in issues:
-        issue_data = {
-            "key": issue.key,
-            "summary": issue.fields.summary,
-            "status": issue.fields.status.name,
-        }
-        if hasattr(issue.fields, "assignee") and issue.fields.assignee:
-            issue_data["assignee"] = issue.fields.assignee.displayName
-        results.append(issue_data)
-
-    # Build response
-    response = {
-        "query": query,
-        "jql": jql,
-        "matched_entities": matched_entities,
-        "total": len(results),
-        "issues": results,
-    }
-
-    return [TextContent(type="text", text=json.dumps(response, indent=2))]
 
 
 async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:

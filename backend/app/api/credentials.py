@@ -1,6 +1,7 @@
 """Credentials API endpoints with per-user OAuth support."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
@@ -75,27 +76,81 @@ async def get_credentials_status(
     user: Optional[User] = Depends(get_current_user_optional),  # Allow both auth and anon
     db: AsyncSession = Depends(get_db),
 ):
-    """Check if credentials are configured for a datasource."""
+    """
+    Check if credentials are configured for a datasource and their health.
+
+    Returns:
+        configured: Whether credentials exist
+        status: 'connected' | 'expired' | 'disconnected'
+        expires_at: ISO timestamp of token expiry (if applicable)
+    """
     try:
-        if user:
-            # Check for authenticated user
-            has_credentials = await credential_service.has_credentials(
-                datasource=datasource,
-                db=db,
-                user_id=user.id,
-            )
-        else:
-            # Check for anonymous user
+        user_id = user.id if user else None
+        session_id = None
+
+        if not user:
             session_id = req.cookies.get("session_id")
             if not session_id:
-                return {"configured": False}
+                return {"configured": False, "status": "disconnected"}
 
-            has_credentials = await credential_service.has_credentials(
-                datasource=datasource,
-                session_id=session_id,
+        has_credentials = await credential_service.has_credentials(
+            datasource=datasource,
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        if not has_credentials:
+            return {"configured": False, "status": "disconnected"}
+
+        # Check token health for OAuth datasources
+        status = "connected"
+        expires_at = None
+
+        credentials = await credential_service.get_credentials(
+            datasource=datasource,
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        # Get connected account identifier (email, username, etc.)
+        connected_account = None
+        if credentials:
+            # Try common fields for account identifier (different connectors use different field names)
+            connected_account = (
+                credentials.get("email") or
+                credentials.get("user_email") or
+                credentials.get("google_email") or  # Google Workspace
+                credentials.get("slack_user_email") or  # Slack
+                credentials.get("username") or
+                credentials.get("login") or  # GitHub
+                credentials.get("user_name") or
+                credentials.get("account_id") or
+                credentials.get("jira_email")  # Jira
             )
 
-        return {"configured": has_credentials}
+            expires_at_str = credentials.get("expires_at")
+            if expires_at_str:
+                try:
+                    if expires_at_str.endswith("Z"):
+                        expires_at_str = expires_at_str[:-1] + "+00:00"
+                    token_expiry = datetime.fromisoformat(expires_at_str)
+                    if token_expiry.tzinfo is None:
+                        token_expiry = token_expiry.replace(tzinfo=timezone.utc)
+                    expires_at = token_expiry.isoformat()
+
+                    if token_expiry < datetime.now(timezone.utc):
+                        status = "expired"
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Could not parse expires_at for {datasource}: {e}")
+
+        return {
+            "configured": True,
+            "status": status,
+            "expires_at": expires_at,
+            "connected_account": connected_account,
+        }
 
     except Exception as e:
         logger.error(f"Error checking credentials status: {str(e)}")
@@ -143,6 +198,7 @@ async def get_oauth_availability():
         "slack": user_oauth_service.is_oauth_configured("slack"),
         "github": user_oauth_service.is_oauth_configured("github"),
         "jira": user_oauth_service.is_oauth_configured("jira"),
+        "google_workspace": user_oauth_service.is_oauth_configured("google_workspace"),
     }
 
 
@@ -160,7 +216,7 @@ async def start_oauth(
     """
     datasource_lower = datasource.lower()
 
-    if datasource_lower not in ["slack", "github", "jira"]:
+    if datasource_lower not in ["slack", "github", "jira", "google_workspace"]:
         raise HTTPException(
             status_code=400,
             detail=f"OAuth not supported for datasource: {datasource}",

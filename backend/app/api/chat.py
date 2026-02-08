@@ -74,7 +74,13 @@ async def send_message_stream(
     Send a chat message and get a streaming response.
 
     Supports both authenticated and anonymous users.
+
+    IMPORTANT: We use get_db_context() inside the generator because FastAPI's
+    Depends(get_db) closes the session when StreamingResponse is returned,
+    but we need the session to remain open during the actual streaming.
     """
+    from app.core.database import get_db_context
+
     try:
         # Generate session ID if not provided
         session_id = request.session_id or generate_session_id()
@@ -88,6 +94,10 @@ async def send_message_stream(
         # Use user_id for credentials if authenticated
         if user:
             credential_session_id = user.id
+
+        # Store user info for use inside generator (user object may not be accessible after response starts)
+        user_id = user.id if user else None
+        is_authenticated = user is not None
 
         async def event_generator():
             """Generate Server-Sent Events with structured agent steps."""
@@ -117,79 +127,27 @@ async def send_message_stream(
                 return {"type": "agent_step", "step": step}
 
             async def generate_follow_up_questions(query: str, response: str, datasource: str) -> List[str]:
-                """Generate contextual follow-up questions using Claude Haiku."""
-                from anthropic import Anthropic
-                from app.core.config import settings
+                """
+                Generate follow-up questions for the conversation.
 
-                # Data source specific hints for better questions
-                datasource_hints = {
-                    "slack": "channels, users, messages, threads, reactions, DMs, keywords, time periods",
-                    "mysql": "tables, columns, records, aggregations, filters, joins, trends over time",
-                    "s3": "buckets, files, folders, file types, sizes, recent uploads, metadata",
-                    "jira": "issues, sprints, assignees, statuses, priorities, blockers, deadlines",
-                    "google_workspace": "docs, sheets, emails, calendar events, drive files, shared items",
-                    "github": "repos, PRs, issues, commits, branches, contributors, code reviews",
-                    "shopify": "orders, products, customers, inventory, sales trends, refunds",
+                IMPORTANT: We use ONLY static fallbacks to prevent hallucination.
+                AI-generated follow-ups were causing hallucinated names/entities
+                (e.g., "Akash Vignesh" instead of real owner "Akash Anand").
+
+                Reliability > Dynamic questions. Static questions are always accurate.
+                """
+                # Static questions only - NO AI generation to prevent hallucination
+                # These are generic but SAFE - they will never contain fabricated names
+                fallback = {
+                    "mysql": ["What are the top 10 by count?", "Show trends over the last week", "Which records were updated recently?"],
+                    "s3": ["What's the largest file?", "Show files modified this week", "List files by type"],
+                    "jira": ["Which issues are blocked?", "What's assigned to me?", "Show overdue items"],
+                    "google_workspace": ["Who edited this recently?", "Show my upcoming meetings", "Find related documents"],
+                    "slack": ["What did they say about this?", "Show recent activity in that channel", "Any threads I should check?"],
+                    "github": ["Show recent commits", "Any open PRs to review?", "What issues need attention?"],
+                    "shopify": ["Show today's orders", "What products are low stock?", "Top selling items this week?"],
                 }
-
-                try:
-                    client = Anthropic(api_key=settings.anthropic_api_key)
-
-                    # Use Haiku for fast, cheap follow-up generation
-                    result = client.messages.create(
-                        model="claude-3-5-haiku-20241022",
-                        max_tokens=250,
-                        messages=[{
-                            "role": "user",
-                            "content": f"""Generate 3 insightful follow-up questions based on this {datasource} conversation.
-
-USER'S QUESTION: {query}
-
-RESPONSE GIVEN: {response[:800]}
-
-CONTEXT: This is a {datasource} data source. Relevant concepts: {datasource_hints.get(datasource, 'data records, details, related items')}
-
-ACCURACY RULES - CRITICAL:
-- ONLY reference names, dates, items, or entities that appear EXPLICITLY in the RESPONSE GIVEN above
-- Do NOT invent or assume any entities, people, projects, or data that are not in the response
-- If the response has limited data, generate broader exploratory questions instead of specific ones
-- Never assume what data might exist - only reference what was actually returned
-
-Generate questions that:
-1. DIG DEEPER - Ask about specific details mentioned in the response (only if they exist)
-2. COMPARE/CONTRAST - Explore patterns, changes over time, or comparisons
-3. TAKE ACTION - Suggest logical next steps based on what was found
-
-RULES:
-- Be SPECIFIC - reference actual names, dates, or items from the response when possible
-- Be ACTIONABLE - questions should lead to useful insights
-- Be NATURAL - phrase like a real person would ask
-- Keep under 12 words each
-- NO generic questions like "Tell me more" or "Show details"
-
-Return ONLY 3 questions, one per line, no bullets or numbers."""
-                        }]
-                    )
-
-                    # Parse the response into a list
-                    questions = [q.strip() for q in result.content[0].text.strip().split('\n') if q.strip()]
-                    # Filter out any that are too generic or too short
-                    questions = [q for q in questions if len(q) > 10 and not q.lower().startswith(('tell me', 'show me more', 'what else'))]
-                    return questions[:3]
-
-                except Exception as e:
-                    # Fallback to static questions if AI fails
-                    logger.warning(f"Failed to generate follow-ups: {e}")
-                    fallback = {
-                        "mysql": ["What are the top 10 by count?", "Show trends over the last week", "Which records were updated recently?"],
-                        "s3": ["What's the largest file?", "Show files modified this week", "List files by type"],
-                        "jira": ["Which issues are blocked?", "What's assigned to me?", "Show overdue items"],
-                        "google_workspace": ["Who edited this recently?", "Show my upcoming meetings", "Find related documents"],
-                        "slack": ["What did they say about this?", "Show recent activity in that channel", "Any threads I should check?"],
-                        "github": ["Show recent commits", "Any open PRs to review?", "What issues need attention?"],
-                        "shopify": ["Show today's orders", "What products are low stock?", "Top selling items this week?"],
-                    }
-                    return fallback.get(datasource, ["What patterns do you see?", "Show me the breakdown", "Compare with last week"])
+                return fallback.get(datasource, ["What patterns do you see?", "Show me the breakdown", "Compare with last week"])
 
             try:
                 # Send session ID first
@@ -202,71 +160,75 @@ Return ONLY 3 questions, one per line, no bullets or numbers."""
                     "Understanding your request..."
                 ))
 
-                # Stream the response
-                async for chunk in chat_service.process_message_stream(
-                    message=request.message,
-                    datasource=request.datasource,
-                    session_id=session_id,
-                    credential_session_id=credential_session_id,
-                    user_id=user.id if user else None,
-                    db=db if user else None,
-                ):
-                    # Check if this is a structured event (dict) or plain text
-                    if isinstance(chunk, dict):
-                        # Structured event from backend
-                        event_type = chunk.get("type")
-                        if event_type == "thinking_start":
-                            step_counter += 1
-                            # Signal start of extended thinking
-                            yield make_sse({
-                                "type": "thinking_start"
-                            })
-                            yield make_sse(make_step(
-                                f"step-{step_counter}", "thinking", "Thinking", "active",
-                                "Processing your request..."
-                            ))
-                        elif event_type == "thinking":
-                            thinking_content = chunk.get("content", "")
-                            # Stream actual thinking content from Claude
-                            yield make_sse({
-                                "type": "thinking",
-                                "content": thinking_content
-                            })
-                        elif event_type == "thinking_end":
-                            # Signal end of thinking
-                            yield make_sse({
-                                "type": "thinking_end"
-                            })
-                            # Complete the thinking step
-                            yield make_sse(make_step(
-                                f"step-{step_counter}", "thinking", "Thinking complete", "complete"
-                            ))
-                        elif event_type == "tool_start":
-                            step_counter += 1
-                            tool_name = chunk.get("tool", "tool")
-                            # Track source used
-                            sources_used.append({
-                                "type": "tool",
-                                "name": tool_name,
-                                "description": chunk.get("description", "")
-                            })
-                            yield make_sse(make_step(
-                                f"step-{step_counter}", "tool_call", f"Using {tool_name}", "active",
-                                chunk.get("description", "Executing tool...")
-                            ))
-                        elif event_type == "tool_end":
-                            tool_name = chunk.get("tool", "tool")
-                            yield make_sse(make_step(
-                                f"step-{step_counter}", "tool_call", f"Completed {tool_name}", "complete"
-                            ))
-                        elif event_type == "text":
-                            content = chunk.get("content", "")
-                            accumulated_content += content
-                            yield make_sse({"type": "content", "content": content})
-                    else:
-                        # Plain text chunk
-                        accumulated_content += chunk
-                        yield make_sse({"type": "content", "content": chunk})
+                # IMPORTANT: Create a fresh db session inside the generator
+                # FastAPI's Depends(get_db) session is closed when StreamingResponse returns
+                # We need an active session for the duration of the streaming
+                async with get_db_context() as stream_db:
+                    # Stream the response with fresh db session
+                    async for chunk in chat_service.process_message_stream(
+                        message=request.message,
+                        datasource=request.datasource,
+                        session_id=session_id,
+                        credential_session_id=credential_session_id,
+                        user_id=user_id,  # Use stored user_id, not user.id
+                        db=stream_db if is_authenticated else None,
+                    ):
+                        # Check if this is a structured event (dict) or plain text
+                        if isinstance(chunk, dict):
+                            # Structured event from backend
+                            event_type = chunk.get("type")
+                            if event_type == "thinking_start":
+                                step_counter += 1
+                                # Signal start of extended thinking
+                                yield make_sse({
+                                    "type": "thinking_start"
+                                })
+                                yield make_sse(make_step(
+                                    f"step-{step_counter}", "thinking", "Thinking", "active",
+                                    "Processing your request..."
+                                ))
+                            elif event_type == "thinking":
+                                thinking_content = chunk.get("content", "")
+                                # Stream actual thinking content from Claude
+                                yield make_sse({
+                                    "type": "thinking",
+                                    "content": thinking_content
+                                })
+                            elif event_type == "thinking_end":
+                                # Signal end of thinking
+                                yield make_sse({
+                                    "type": "thinking_end"
+                                })
+                                # Complete the thinking step
+                                yield make_sse(make_step(
+                                    f"step-{step_counter}", "thinking", "Thinking complete", "complete"
+                                ))
+                            elif event_type == "tool_start":
+                                step_counter += 1
+                                tool_name = chunk.get("tool", "tool")
+                                # Track source used
+                                sources_used.append({
+                                    "type": "tool",
+                                    "name": tool_name,
+                                    "description": chunk.get("description", "")
+                                })
+                                yield make_sse(make_step(
+                                    f"step-{step_counter}", "tool_call", f"Using {tool_name}", "active",
+                                    chunk.get("description", "Executing tool...")
+                                ))
+                            elif event_type == "tool_end":
+                                tool_name = chunk.get("tool", "tool")
+                                yield make_sse(make_step(
+                                    f"step-{step_counter}", "tool_call", f"Completed {tool_name}", "complete"
+                                ))
+                            elif event_type == "text":
+                                content = chunk.get("content", "")
+                                accumulated_content += content
+                                yield make_sse({"type": "content", "content": content})
+                        else:
+                            # Plain text chunk
+                            accumulated_content += chunk
+                            yield make_sse({"type": "content", "content": chunk})
 
                 # Send completion step
                 elapsed = time.time() - start_time

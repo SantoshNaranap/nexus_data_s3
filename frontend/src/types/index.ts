@@ -14,6 +14,7 @@ export interface ChatMessage {
   sources?: SourceReference[]; // Perplexity-like source citations
   followUpQuestions?: string[]; // Suggested follow-up questions
   thinkingContent?: string; // AI's thinking process (collapsible)
+  errorInvestigation?: ErrorInvestigation; // Error diagnosis results
 }
 
 export interface SourceReference {
@@ -84,4 +85,45 @@ export interface AgentStep {
     datasource?: string;
     result?: string;
   };
+}
+
+// Error Investigation Types
+export interface InvestigationFinding {
+  category: 'credentials' | 'circuit_breaker' | 'connection' | 'mcp' | 'error_pattern' | 'unknown';
+  severity: 'critical' | 'warning' | 'info';
+  title: string;
+  detail: string;
+  suggested_action?: string;
+}
+
+export interface ErrorInvestigation {
+  investigation_id: string;
+  status: 'investigating' | 'completed' | 'failed' | 'timeout';
+  root_cause?: string;
+  findings: InvestigationFinding[];
+  recommendations: string[];
+  investigated_at?: string;
+  duration_ms?: number;
+}
+
+export interface ErrorInvestigationRequest {
+  error_message: string;
+  datasource: string;
+  user_query?: string;
+  session_id?: string;
+}
+
+// Remediation Types
+export interface RemediationAction {
+  action: string;
+  success: boolean;
+  detail: string;
+}
+
+export interface RemediationResponse {
+  status: 'fixed' | 'partial' | 'failed';
+  message: string;
+  actions: RemediationAction[];
+  connection_restored: boolean;
+  duration_ms: number;
 }

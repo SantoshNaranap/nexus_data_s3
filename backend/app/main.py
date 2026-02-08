@@ -15,7 +15,7 @@ from app.core.cache import init_cache_service, get_cache_service
 from app.core.metrics import get_metrics, MetricsMiddleware
 from app.core.exceptions import AppError
 from app.middleware.rate_limit import RateLimitMiddleware, RateLimitConfig
-from app.api import chat, datasources, credentials, auth, agent, health, digest, admin
+from app.api import chat, datasources, credentials, auth, agent, health, digest, admin, diagnostics
 from app.services.mcp_service import mcp_service
 
 # Configure structured logging
@@ -71,6 +71,13 @@ async def lifespan(app: FastAPI):
     logger.info("MCP connections will be established on first use")
 
     yield
+
+    # Close pooled MCP connections on shutdown
+    try:
+        await mcp_service.shutdown()
+        logger.info("MCP connection pool closed")
+    except Exception as e:
+        logger.error(f"Error closing MCP connections: {e}")
 
     # Close database connections on shutdown
     try:
@@ -151,6 +158,7 @@ app.include_router(datasources.router)
 app.include_router(credentials.router)
 app.include_router(agent.router)  # Multi-source agent orchestration
 app.include_router(digest.router)  # "What You Missed" digest feature
+app.include_router(diagnostics.router)  # Error investigation diagnostics
 
 
 # ============ Request Context Middleware ============

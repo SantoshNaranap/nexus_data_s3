@@ -285,7 +285,7 @@ class SourceDetector:
             
         elif datasource == "google_workspace":
             if "email" in query_lower or "gmail" in query_lower:
-                return "Use list_messages to retrieve emails"
+                return "Use search_gmail_messages to retrieve emails"
             elif "calendar" in query_lower or "meeting" in query_lower:
                 return "Use get_events to check calendar"
             return "Use search_drive_files to find documents"

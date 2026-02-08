@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { chatApi } from '../services/api'
+import { chatApi, diagnosticsApi } from '../services/api'
 import { agentApi } from '../services/agentApi'
-import type { DataSource, ChatMessage, AgentStep, SourceReference } from '../types'
+import type { DataSource, ChatMessage, AgentStep, SourceReference, ErrorInvestigation, RemediationResponse } from '../types'
 import { SessionManager } from '../utils/sessionManager'
+import { useErrorDetection } from './useErrorDetection'
 
 interface UseChatProps {
   datasource: DataSource
@@ -18,6 +19,7 @@ interface UseChatReturn {
   agentSteps: AgentStep[]
   thinkingContent: string
   isActivelyThinking: boolean
+  isInvestigating: boolean
   handleSubmit: (e: React.FormEvent) => Promise<void>
   handleNewConversation: () => void
   handleFollowUpClick: (question: string) => void
@@ -34,9 +36,12 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
   const [isActivelyThinking, setIsActivelyThinking] = useState(false)
   const [_currentSources, setCurrentSources] = useState<SourceReference[]>([])
   const [_followUpQuestions, setFollowUpQuestions] = useState<string[]>([])
+  const [isInvestigating, setIsInvestigating] = useState(false)
 
   const abortControllerRef = useRef<AbortController | null>(null)
   const stepCounter = useRef(0)
+  const { detectError } = useErrorDetection()
+  const pendingUserQuery = useRef<string>('')
 
   // Reset state when datasource changes
   useEffect(() => {
@@ -81,6 +86,98 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
     )
   }, [])
 
+  // Investigate error, attempt auto-fix, and attach results to the last message
+  const investigateError = useCallback(async (content: string, userQuery: string) => {
+    console.log('[ErrorAgent] Checking response for errors...')
+    if (!detectError(content)) {
+      console.log('[ErrorAgent] No error detected, skipping')
+      return
+    }
+
+    console.log('[ErrorAgent] Error detected! Starting investigation and auto-fix for', datasource.id)
+    setIsInvestigating(true)
+    try {
+      // Step 1: Investigate to understand the problem
+      const investigation = await diagnosticsApi.investigate({
+        error_message: content,
+        datasource: datasource.id,
+        user_query: userQuery,
+        session_id: sessionId || undefined,
+      })
+
+      // Attach investigation to the last message immediately (shows findings)
+      setMessages(prev => {
+        const updated = [...prev]
+        const lastIndex = updated.length - 1
+        if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
+          updated[lastIndex] = {
+            ...updated[lastIndex],
+            errorInvestigation: { ...investigation, status: 'investigating' as const },
+          }
+        }
+        return updated
+      })
+
+      // Step 2: Attempt auto-remediation
+      let remediation: RemediationResponse | null = null
+      try {
+        remediation = await diagnosticsApi.remediate(datasource.id, sessionId || undefined)
+      } catch (remErr) {
+        console.error('Auto-remediation failed:', remErr)
+      }
+
+      // Step 3: Update the message with final investigation + remediation results
+      setMessages(prev => {
+        const updated = [...prev]
+        const lastIndex = updated.length - 1
+        if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
+          const finalInvestigation: ErrorInvestigation = {
+            ...investigation,
+            status: 'completed',
+          }
+
+          // If remediation succeeded, add a finding about it
+          if (remediation) {
+            const remediationFinding = {
+              category: 'connection' as const,
+              severity: remediation.connection_restored ? 'info' as const : 'warning' as const,
+              title: remediation.connection_restored
+                ? 'Auto-fix successful'
+                : remediation.status === 'partial'
+                  ? 'Partial fix applied'
+                  : 'Auto-fix failed',
+              detail: remediation.message,
+              suggested_action: remediation.connection_restored
+                ? 'Please retry your query'
+                : 'Go to Settings and reconnect this datasource',
+            }
+            finalInvestigation.findings = [...investigation.findings, remediationFinding]
+
+            // Update recommendations
+            if (remediation.connection_restored) {
+              finalInvestigation.recommendations = ['Your query should work now — please retry.']
+            } else {
+              finalInvestigation.recommendations = [
+                ...investigation.recommendations,
+                `Auto-fix status: ${remediation.status}. ${remediation.message}`,
+              ]
+            }
+          }
+
+          updated[lastIndex] = {
+            ...updated[lastIndex],
+            errorInvestigation: finalInvestigation,
+          }
+        }
+        return updated
+      })
+    } catch (error) {
+      console.error('Error investigation failed:', error)
+    } finally {
+      setIsInvestigating(false)
+    }
+  }, [detectError, datasource.id, sessionId])
+
   const handleNewConversation = useCallback(() => {
     if (confirm('Start a new conversation? This will clear your chat history for this datasource.')) {
       const newSessionId = SessionManager.startNewSession(datasource.id)
@@ -111,6 +208,7 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
 
     setMessages(prev => [...prev, userMessage])
     const messageText = input
+    pendingUserQuery.current = messageText  // Store for error investigation
     setInput('')
     setIsStreaming(true)
     setStreamingMessage('')
@@ -224,17 +322,24 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
               ])
               setStreamingMessage('')
               setIsStreaming(false)
+
+              // Investigate errors in the response
+              investigateError(accumulatedMessage, pendingUserQuery.current)
             },
             onError: (error) => {
               setAgentSteps(prev => prev.map(s =>
                 s.status === 'active' ? { ...s, status: 'error' as const, description: error } : s
               ))
+              const errorContent = `Error: ${error}. Please try again.`
               setMessages(prev => [
                 ...prev,
-                { role: 'assistant', content: `Error: ${error}. Please try again.`, timestamp: new Date().toISOString() },
+                { role: 'assistant', content: errorContent, timestamp: new Date().toISOString() },
               ])
               setStreamingMessage('')
               setIsStreaming(false)
+
+              // Investigate and auto-fix streaming errors
+              investigateError(errorContent, pendingUserQuery.current)
             },
           },
           abortSignal
@@ -291,17 +396,24 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
             ])
             setStreamingMessage('')
             setIsStreaming(false)
+
+            // Investigate errors in the response
+            investigateError(accumulatedMessage, pendingUserQuery.current)
           },
           (error) => {
             setAgentSteps(prev => prev.map(s =>
               s.status === 'active' ? { ...s, status: 'error' as const, description: error } : s
             ))
+            const errorContent = `Error: ${error}. Please try again.`
             setMessages(prev => [
               ...prev,
-              { role: 'assistant', content: `Error: ${error}. Please try again.`, timestamp: new Date().toISOString() },
+              { role: 'assistant', content: errorContent, timestamp: new Date().toISOString() },
             ])
             setStreamingMessage('')
             setIsStreaming(false)
+
+            // Investigate and auto-fix streaming errors
+            investigateError(errorContent, pendingUserQuery.current)
           },
           undefined,
           undefined,
@@ -337,7 +449,7 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
       setStreamingMessage('')
       setIsStreaming(false)
     }
-  }, [input, isStreaming, sessionId, datasource.id, addAgentStep, completeAgentStep])
+  }, [input, isStreaming, sessionId, datasource.id, addAgentStep, completeAgentStep, investigateError])
 
   return {
     messages,
@@ -349,6 +461,7 @@ export function useChat({ datasource }: UseChatProps): UseChatReturn {
     agentSteps,
     thinkingContent,
     isActivelyThinking,
+    isInvestigating,
     handleSubmit,
     handleNewConversation,
     handleFollowUpClick,

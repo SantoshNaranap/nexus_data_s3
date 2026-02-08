@@ -8,17 +8,19 @@ interface ChatHeaderProps {
   hasMessages: boolean
   isStreaming: boolean
   isConfigured: boolean
+  connectedAccount?: string | null
   onToggleAgentPanel: () => void
   onNewConversation: () => void
 }
 
 export default function ChatHeader({
   datasource,
-  sessionId,
+  sessionId: _sessionId,
   showAgentPanel,
   hasMessages,
   isStreaming,
   isConfigured,
+  connectedAccount,
   onToggleAgentPanel,
   onNewConversation,
 }: ChatHeaderProps) {
@@ -58,7 +60,13 @@ export default function ChatHeader({
           {isConfigured ? (
             <div className="flex items-center text-xs text-green-600 dark:text-green-400">
               <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-              Connected
+              {connectedAccount ? (
+                <span title={connectedAccount}>
+                  Connected as <span className="font-medium">{connectedAccount}</span>
+                </span>
+              ) : (
+                'Connected'
+              )}
             </div>
           ) : (
             <div className="flex items-center text-xs text-amber-600 dark:text-amber-400">

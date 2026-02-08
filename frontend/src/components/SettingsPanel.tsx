@@ -10,6 +10,7 @@ interface SettingsPanelProps {
   onClose: () => void
   onSave: (datasource: string, credentials: Record<string, string>, testResult?: { success: boolean }) => void
   configuredDatasources: Set<string>
+  expiredDatasources?: Set<string>
 }
 
 // OrgDataSource interface reserved for future org-level datasource management
@@ -254,7 +255,7 @@ const credentialFields: Record<string, CredentialField[]> = {
 
 
 // Datasources that support OAuth (no manual credentials needed)
-const OAUTH_DATASOURCES = ['slack', 'github', 'jira']
+const OAUTH_DATASOURCES = ['slack', 'github', 'jira', 'google_workspace']
 
 export default function SettingsPanel({
   datasources,
@@ -262,6 +263,7 @@ export default function SettingsPanel({
   onClose,
   onSave,
   configuredDatasources,
+  expiredDatasources = new Set(),
 }: SettingsPanelProps) {
   const { user: _user } = useAuth() // Reserved for future user-specific settings
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(
@@ -485,7 +487,9 @@ export default function SettingsPanel({
                     </span>
                   </div>
                   {configuredDatasources.has(datasource.id) && (
-                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                    <div className={`w-2 h-2 rounded-full ${
+                      expiredDatasources.has(datasource.id) ? 'bg-amber-500' : 'bg-green-500'
+                    }`}></div>
                   )}
                 </div>
                 {isOAuthDatasource(datasource.id) && (
@@ -523,9 +527,19 @@ export default function SettingsPanel({
                     </div>
                   </div>
                   {isConfigured && (
-                    <div className="flex items-center text-sm text-green-600 dark:text-green-400">
-                      <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                      Configured
+                    <div className={`flex items-center text-sm ${
+                      selectedDatasource && expiredDatasources.has(selectedDatasource.id)
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-green-600 dark:text-green-400'
+                    }`}>
+                      <div className={`w-2 h-2 rounded-full mr-2 ${
+                        selectedDatasource && expiredDatasources.has(selectedDatasource.id)
+                          ? 'bg-amber-500'
+                          : 'bg-green-500'
+                      }`}></div>
+                      {selectedDatasource && expiredDatasources.has(selectedDatasource.id)
+                        ? 'Token Expired'
+                        : 'Configured'}
                     </div>
                   )}
                 </div>
@@ -537,6 +551,42 @@ export default function SettingsPanel({
                   {isOAuthDatasource(selectedDatasource.id) ? (
                     <div className="space-y-6">
                       {isConfigured ? (
+                        expiredDatasources.has(selectedDatasource.id) ? (
+                        /* Expired token state */
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-6">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                              <svg className="w-8 h-8 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                              </svg>
+                              <div>
+                                <p className="font-medium text-amber-900 dark:text-amber-200">
+                                  Your {selectedDatasource.name} token has expired
+                                </p>
+                                <p className="text-sm text-amber-700 dark:text-amber-300">
+                                  Please reconnect to continue querying your {selectedDatasource.name} data
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <button
+                                onClick={() => handleOAuthConnect(selectedDatasource.id)}
+                                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors text-sm font-medium"
+                              >
+                                Reconnect
+                              </button>
+                              <button
+                                onClick={() => handleDisconnect(selectedDatasource.id)}
+                                disabled={disconnecting[selectedDatasource.id]}
+                                className="px-4 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {disconnecting[selectedDatasource.id] ? 'Disconnecting...' : 'Disconnect'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        ) : (
+                        /* Connected state */
                         <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-6">
                           <div className="flex items-center justify-between">
                             <div className="flex items-center space-x-3">
@@ -561,6 +611,7 @@ export default function SettingsPanel({
                             </button>
                           </div>
                         </div>
+                        )
                       ) : oauthAvailable[selectedDatasource.id] ? (
                         <div className="text-center py-8">
                           <div className="mb-6">

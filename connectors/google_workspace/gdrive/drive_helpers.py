@@ -93,7 +93,8 @@ def build_drive_list_params(
     list_params = {
         "q": query,
         "pageSize": page_size,
-        "fields": "nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, size)",
+        # IMPORTANT: Include owners field so Claude has REAL owner data and doesn't hallucinate
+        "fields": "nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, size, owners)",
         "supportsAllDrives": True,
         "includeItemsFromAllDrives": include_items_from_all_drives,
     }

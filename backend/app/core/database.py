@@ -20,13 +20,16 @@ DATABASE_URL = (
 )
 
 # Create async engine with connection timeout
+# Pool sizing: pool_size is maintained connections, max_overflow is additional on-demand
+# Total max connections = pool_size + max_overflow
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,  # Enable connection health checks
-    pool_size=5,
-    max_overflow=10,
-    pool_timeout=10,  # Wait max 10 seconds for connection
+    pool_size=20,  # Increased from 5 - maintained connections
+    max_overflow=30,  # Increased from 10 - burst capacity
+    pool_timeout=30,  # Increased from 10 - wait for connection
+    pool_recycle=1800,  # Recycle connections after 30 minutes
     connect_args={
         "connect_timeout": 10,  # MySQL connection timeout
     },

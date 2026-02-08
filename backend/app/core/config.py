@@ -102,6 +102,8 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
     google_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/auth/google/callback
+    google_workspace_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/credentials/google_workspace/oauth/callback
+    google_oauth_base_url: str = ""  # Override base URL for Google OAuth
     user_google_email: str = ""  # Optional: for single-user mode
 
     # Slack - defaults for connector (can be overridden by tenant/user creds)
@@ -112,18 +114,22 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/slack/callback
+    slack_oauth_base_url: str = ""  # Override base URL for Slack OAuth (e.g., ngrok URL for HTTPS)
 
     # GitHub - defaults for connector (can be overridden by tenant/user creds)
-    github_token: str = ""  # Personal Access Token or GitHub App token
+    github_token: str = ""  # Legacy - kept for backwards compatibility
+    github_personal_access_token: str = ""  # Official GitHub MCP Server uses this
     # GitHub OAuth - for admin datasource connection
     github_client_id: str = ""
     github_client_secret: str = ""
     github_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/github/callback
+    github_oauth_base_url: str = ""  # Override base URL for GitHub OAuth
 
     # Jira OAuth - for admin datasource connection
     jira_client_id: str = ""
     jira_client_secret: str = ""
     jira_oauth_redirect_uri: str = ""  # e.g., https://yourapp.com/api/admin/datasources/jira/callback
+    jira_oauth_base_url: str = ""  # Override base URL for Jira OAuth
 
     # JWT Configuration
     jwt_secret_key: str = "insecure-jwt-secret-key-dev-only"

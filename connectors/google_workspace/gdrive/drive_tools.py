@@ -88,8 +88,15 @@ async def search_drive_files(
     formatted_files_text_parts = [f"Found {len(files)} files for {user_google_email} matching '{query}':"]
     for item in files:
         size_str = f", Size: {item.get('size', 'N/A')}" if 'size' in item else ""
+        # Include owner information from API response (prevents hallucination)
+        owners = item.get('owners', [])
+        if owners:
+            owner = owners[0]  # Primary owner
+            owner_str = f", Owner: {owner.get('displayName', 'Unknown')} ({owner.get('emailAddress', 'Unknown')})"
+        else:
+            owner_str = ""
         formatted_files_text_parts.append(
-            f"- Name: \"{item['name']}\" (ID: {item['id']}, Type: {item['mimeType']}{size_str}, Modified: {item.get('modifiedTime', 'N/A')}) Link: {item.get('webViewLink', '#')}"
+            f"- Name: \"{item['name']}\" (ID: {item['id']}, Type: {item['mimeType']}{size_str}{owner_str}, Modified: {item.get('modifiedTime', 'N/A')}) Link: {item.get('webViewLink', '#')}"
         )
     text_output = "\n".join(formatted_files_text_parts)
     return text_output
