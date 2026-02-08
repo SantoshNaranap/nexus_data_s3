@@ -633,10 +633,11 @@ class MCPService:
                 await breaker.record_failure(fallback_error)
                 raise
 
-    def _get_cache_key(self, datasource: str, tool_name: str, arguments: dict) -> str:
-        """Generate a cache key for result caching."""
+    def _get_cache_key(self, datasource: str, tool_name: str, arguments: dict, user_id: Optional[str] = None, session_id: Optional[str] = None) -> str:
+        """Generate a cache key for result caching. Includes user context to prevent cross-user cache leaks."""
+        identity = user_id or session_id or "anonymous"
         args_str = json.dumps(arguments, sort_keys=True)
-        key_str = f"{datasource}:{tool_name}:{args_str}"
+        key_str = f"{identity}:{datasource}:{tool_name}:{args_str}"
         return hashlib.md5(key_str.encode()).hexdigest()
 
     async def _check_result_cache(self, cache_key: str, force_refresh: bool = False) -> Optional[List[Any]]:
@@ -717,7 +718,7 @@ class MCPService:
 
         cache_key = None
         if tool_name in cacheable_tools:
-            cache_key = self._get_cache_key(datasource, tool_name, arguments)
+            cache_key = self._get_cache_key(datasource, tool_name, arguments, user_id=user_id, session_id=session_id)
             cached_result = await self._check_result_cache(cache_key, force_refresh=force_refresh)
             if cached_result is not None:
                 elapsed = time.time() - start_time

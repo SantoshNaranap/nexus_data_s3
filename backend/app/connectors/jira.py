@@ -94,7 +94,7 @@ JIRA TOOLS - COMPREHENSIVE GUIDE:
 2. NEVER say "I can't find" without calling query_jira first
 3. NEVER say "I don't have access" without trying tools
 4. If query_jira returns results, SHOW THEM ALL
-5. Person names work directly: "Austin", "Akash", etc.
+5. Person names work directly - use first names or full names.
 
 **WORKFLOW EXAMPLES:**
 
@@ -119,7 +119,7 @@ JIRA TOOLS - COMPREHENSIVE GUIDE:
 → Display ALL issues
 
 **SMART FEATURES:**
-- query_jira understands first names (Austin → Austin Prabu)
+- query_jira understands first names (resolves to full names)
 - query_jira understands project nicknames
 - query_jira handles status words (open, closed, in progress)
 - query_jira can count ("how many bugs?")

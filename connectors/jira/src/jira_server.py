@@ -148,16 +148,16 @@ async def list_tools() -> list[Tool]:
             description="""RECOMMENDED: Query JIRA using natural language.
 
 This tool automatically:
-- Matches person names (e.g., "austin" → "Austin Prabu")
-- Matches project names (e.g., "oralia-v2" → project key "ORALIA")
+- Matches person names (first names resolve to full names)
+- Matches project names (names resolve to project keys)
 - Handles status filters ("open issues", "closed", "in progress")
 - Detects counts ("how many issues")
 - Generates and executes the correct JQL query
 
 Examples:
-- "What is austin working on in Oralia-v2?"
+- "What is [person] working on in [project]?"
 - "How many open bugs are there?"
-- "Show me santosh's tasks"
+- "Show me [person]'s tasks"
 - "What's in the backlog?"
 
 Just pass the user's question as-is to this tool!""",

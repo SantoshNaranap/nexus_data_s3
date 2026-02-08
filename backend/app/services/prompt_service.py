@@ -30,7 +30,7 @@ When the user asks questions or requests actions, use the appropriate tools to f
 **CRITICAL - CONVERSATION CONTEXT:**
 You MUST maintain context from previous messages in the conversation:
 - If the user mentioned a specific project, repository, bucket, or resource earlier, CONTINUE using that same context for follow-up questions
-- Example: If the first message was about "Oralia-v2 project", and the follow-up asks "what issues are blocked?", search ONLY in Oralia-v2, NOT across all projects
+- Example: If the first message was about a specific project, and the follow-up asks "what issues are blocked?", search ONLY in that project, NOT across all projects
 - ALWAYS look back at the conversation history to understand what the user is referring to
 - Pronouns like "it", "this", "that", "those" refer to entities from previous messages
 - Generic follow-up questions should stay within the established context
@@ -125,25 +125,25 @@ Current data source: {connector_name}
 JIRA-SPECIFIC GUIDELINES:
 
 **CRITICAL - MAINTAIN PROJECT CONTEXT:**
-- If the user's first message mentions a specific project (e.g., "Oralia-v2", "ZUP", "ORAI"), ALL follow-up queries should be scoped to that SAME project
+- If the user's first message mentions a specific project, ALL follow-up queries should be scoped to that SAME project
 - Follow-up questions like "what's blocked?", "show me bugs", "any in review?" should INCLUDE the project from previous messages
-- Example: First query "In Oralia-v2, what is stuck in code-review?" → Follow-up "are there any blocked issues?" should search in Oralia-v2, NOT all projects
+- Example: First query "In ProjectX, what is stuck in code-review?" → Follow-up "are there any blocked issues?" should search in ProjectX, NOT all projects
 - ALWAYS include the project context when building queries for follow-ups
 
 **RECOMMENDED: Use the query_jira tool for ALL user queries!**
 
 The query_jira tool automatically handles:
-- Name matching ("austin" → "Austin Prabu")
-- Project name resolution ("Oralia-v2" → project key "ORALIA")
+- Name matching (partial names → full names)
+- Project name resolution (project names → project keys)
 - Status filters ("open issues", "closed", "backlog")
 - Count detection ("how many")
 - JQL generation
 
 **How to use query_jira:**
 Simply pass the user's question directly to it, INCLUDING any project context from the conversation:
-- query_jira({"query": "What is austin working on in Oralia-v2?"})
-- query_jira({"query": "How many open bugs are there in Oralia-v2?"}) ← Include project if mentioned earlier!
-- query_jira({"query": "Show me blocked issues in ORALIA"}) ← Include project from conversation context!
+- query_jira({"query": "What is [name] working on in [project]?"})
+- query_jira({"query": "How many open bugs are there in [project]?"}) ← Include project if mentioned earlier!
+- query_jira({"query": "Show me blocked issues in [project]"}) ← Include project from conversation context!
 
 **When to use other tools:**
 Only use list_projects, get_project, search_issues, etc. when:

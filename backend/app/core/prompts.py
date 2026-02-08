@@ -78,7 +78,7 @@ CRITICAL FORMATTING RULES - MANDATORY:
 **CRITICAL - CONVERSATION CONTEXT:**
 You MUST maintain context from previous messages in the conversation:
 - If the user mentioned a specific project, repository, bucket, or resource earlier, CONTINUE using that same context
-- Example: If the first message was about "Oralia-v2 project", and the follow-up asks "what issues are blocked?", search ONLY in Oralia-v2
+- Example: If the first message was about a specific project, and the follow-up asks "what issues are blocked?", search ONLY in that same project
 - ALWAYS look back at the conversation history to understand what the user is referring to
 - Pronouns like "it", "this", "that", "those" refer to entities from previous messages
 """
@@ -101,21 +101,17 @@ JIRA-SPECIFIC GUIDELINES:
 3. Use search_issues with proper JQL including 'project = KEY'
 
 **EXAMPLES:**
-- User: "Oralia v2 please" or "Show me Oralia project"
-  → Step 1: list_projects() → finds {'key': 'ORALIA', 'name': 'oralia-v2'}
-  → Step 2: search_issues(jql="project = ORALIA") — NO extra filters for general requests!
+- User: "Show me ProjectX" or "ProjectX please"
+  → Step 1: list_projects() → finds the matching project key
+  → Step 2: search_issues(jql="project = KEY") — NO extra filters for general requests!
 
-- User: "Show me Sensi Hire issues"
-  → Step 1: list_projects() → finds {'key': 'SH', 'name': 'Sensi-Hire'}
-  → Step 2: search_issues(jql="project = SH") — just the project, no status filters
+- User: "What's John working on in ProjectX?"
+  → Step 1: list_projects() → finds the matching project key
+  → Step 2: search_issues(jql="project = KEY AND assignee = 'John'")
 
-- User: "What's Austin working on in Oralia?"
-  → Step 1: list_projects() → finds {'key': 'ORALIA', 'name': 'Oralia-v2'}
-  → Step 2: search_issues(jql="project = ORALIA AND assignee = 'Austin'")
-
-- User: "High priority bugs in ZUP"
-  → Step 1: list_projects() → finds {'key': 'ZUP', 'name': 'Zupain'}
-  → Step 2: search_issues(jql="project = ZUP AND priority = High AND issuetype = Bug")
+- User: "High priority bugs in ProjectY"
+  → Step 1: list_projects() → finds the matching project key
+  → Step 2: search_issues(jql="project = KEY AND priority = High AND issuetype = Bug")
 
 **IMPORTANT - DON'T ADD UNNECESSARY FILTERS:**
 - For general requests like "show me X project" or "X please" → use ONLY 'project = KEY'
@@ -136,7 +132,7 @@ JIRA-SPECIFIC GUIDELINES:
 - Don't return issues from wrong projects
 - Don't add filters the user didn't ask for
 
-**ISSUE KEYS:** Format is PROJECT-123 (e.g., ZUP-456, SH-789)
+**ISSUE KEYS:** Format is PROJECT-123 (e.g., PROJ-456, TEAM-789)
 """
 
     S3 = """
@@ -256,7 +252,7 @@ SLACK-SPECIFIC GUIDELINES:
 **EXAMPLES:**
 - "What did I miss yesterday" → get_all_recent_messages(hours_ago=24)
 - "Catch me up on Slack" → get_all_recent_messages(hours_ago=24)
-- "Messages from Akash" → read_dm_with_user(user="Akash", limit=30)
+- "Messages from [person]" → read_dm_with_user(user="[person]", limit=30)
 - "Search for API credentials" → search_messages(query="API credentials", limit=50)
 - "What's happening in #general" → read_messages(channel="general", limit=50)
 
