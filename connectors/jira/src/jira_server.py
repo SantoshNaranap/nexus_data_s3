@@ -326,7 +326,7 @@ async def handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
     client = get_jira_client()
 
     jql = arguments["jql"]
-    max_results = arguments.get("max_results", 50)
+    max_results = arguments.get("max_results", 20)
     fields = arguments.get("fields", "key,summary,status,assignee")
 
     issues = client.search_issues(jql, maxResults=max_results, fields=fields)
