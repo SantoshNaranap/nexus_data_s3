@@ -441,7 +441,7 @@ async def get_gmail_message_content(
     if cc:
         content_lines.append(f"Cc:      {cc}")
 
-    content_lines.append(f"\n--- BODY ---\n{body_data or '[No text/plain body found]'}")
+    content_lines.append(f"\n--- BODY ---\n{body_data or '[No readable content found]'}")
 
     # Add attachment information if present
     if attachments:
@@ -454,6 +454,7 @@ async def get_gmail_message_content(
                 f"   Use get_gmail_attachment_content(message_id='{message_id}', attachment_id='{att['attachmentId']}') to download"
             )
 
+    content_lines.append("\n=== END OF EMAIL DATA === Do NOT add or invent content beyond what is shown above.")
     return "\n".join(content_lines)
 
 
@@ -632,8 +633,10 @@ async def get_gmail_messages_content_batch(
                     output_messages.append(msg_output)
 
     # Combine all messages with separators
-    final_output = f"Retrieved {len(message_ids)} messages:\n\n"
+    final_output = f"Retrieved {len(message_ids)} messages:\n"
+    final_output += "IMPORTANT: The content below is the COMPLETE and EXACT email data. Do NOT add, invent, or embellish any content beyond what is shown here. If an email body says '[No readable content found]', report that honestly.\n\n"
     final_output += "\n---\n\n".join(output_messages)
+    final_output += "\n\n=== END OF ALL EMAIL DATA ==="
 
     return final_output
 

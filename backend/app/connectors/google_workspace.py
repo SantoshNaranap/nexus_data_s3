@@ -58,7 +58,7 @@ class GoogleWorkspaceConnector(BaseConnector):
 
     @property
     def server_args(self) -> List[str]:
-        return ["--tool-tier", "core", "--single-user"]
+        return ["--tool-tier", "core"]
 
     @property
     def additional_env(self) -> Dict[str, str]:

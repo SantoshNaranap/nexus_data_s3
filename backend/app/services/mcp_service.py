@@ -362,6 +362,9 @@ class MCPService:
             return False
 
         for content in result_content:
+            # Skip image/audio/non-text blocks
+            if hasattr(content, 'type') and content.type in ("image", "audio"):
+                continue
             if hasattr(content, 'text'):
                 text = content.text
                 # Check for structured JSON error response from connector
@@ -373,22 +376,36 @@ class MCPService:
         return False
 
     def _is_auth_error_message(self, text: str) -> bool:
-        """Check if a text message indicates an auth error."""
+        """Check if a text message indicates an auth error.
+
+        IMPORTANT: Patterns must be specific enough to avoid false positives
+        when checking tool results that contain user content (emails, documents, etc.).
+        Bare patterns like '401' will match inside URLs, tracking IDs, and invoice numbers.
+        """
         text_lower = text.lower()
+        # Only check the first 500 chars to avoid matching patterns in email body content
+        text_prefix = text_lower[:500]
         auth_error_patterns = [
-            '401',
-            'unauthorized',
-            'authentication failed',
-            'token expired',
-            'invalid token',
-            'access denied',
-            'jira error: 401',
-            'failure_client_auth',
             'http 401',
+            'status 401',
+            'error 401',
+            'code 401',
+            '401 unauthorized',
+            'jira error: 401',
             'auth_error_401',
+            'authentication failed',
+            'authentication needed',
+            'authentication required',
+            'token expired',
+            'token has been expired or revoked',
+            'invalid_grant',
+            'failure_client_auth',
             'requires_reauth',
+            '"requires_reauth": true',
+            'action required: google authentication',
+            'googleauthenticationerror',
         ]
-        return any(pattern in text_lower for pattern in auth_error_patterns)
+        return any(pattern in text_prefix for pattern in auth_error_patterns)
 
     def _is_auth_error_exception(self, exc: Exception) -> bool:
         """Check if an exception (including nested ones) indicates an auth error."""
@@ -442,8 +459,11 @@ class MCPService:
                 return False
 
             # Refresh based on datasource
-            if datasource.lower() == "jira":
+            ds = datasource.lower()
+            if ds == "jira":
                 refreshed_creds = await user_oauth_service.refresh_jira_credentials(current_creds)
+            elif ds == "google_workspace":
+                refreshed_creds = await user_oauth_service.refresh_google_credentials(current_creds)
             else:
                 logger.warning(f"Token refresh not implemented for {datasource}")
                 return False

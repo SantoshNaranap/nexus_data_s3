@@ -406,7 +406,7 @@ class ChatService:
     # =========================================================================
 
     # Datasources that require per-user OAuth (no fallback to default credentials)
-    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira"}
+    OAUTH_REQUIRED_DATASOURCES = {"slack", "github", "jira", "google_workspace"}
 
     async def process_message_stream(
         self,
@@ -429,7 +429,8 @@ class ChatService:
                     user_id=user_id,
                 )
                 if not has_creds:
-                    error_msg = f"## Connect Your {datasource.title()} Account\n\nYou need to connect your {datasource.title()} account before you can use this feature.\n\n**To connect:**\n1. Click the **Settings** icon (gear) in the sidebar\n2. Select **{datasource.title()}**\n3. Click **Connect with {datasource.title()}**\n\nOnce connected, you'll be able to access your {datasource.title()} data."
+                    ds_display = "Google Workspace" if datasource.lower() == "google_workspace" else datasource.replace("_", " ").title()
+                    error_msg = f"## Connect Your {ds_display} Account\n\nYou need to connect your {ds_display} account before you can use this feature.\n\n**To connect:**\n1. Click the **Settings** icon (gear) in the sidebar\n2. Select **{ds_display}**\n3. Click **Connect with {ds_display}**\n\nOnce connected, you'll be able to access your {ds_display} data."
                     yield {"type": "text", "content": error_msg}
                     return
 
@@ -557,16 +558,68 @@ class ChatService:
                     )
 
                     result_text = ""
+                    image_blocks = []
+                    pdf_blocks = []
                     if result:
                         for content in result:
                             if hasattr(content, "text"):
-                                result_text += content.text
+                                text = content.text
+                                # Check for PDF base64 marker from Drive connector
+                                if text.startswith("__PDF_BASE64__:"):
+                                    b64_data = text[len("__PDF_BASE64__:"):]
+                                    pdf_blocks.append({
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "application/pdf",
+                                            "data": b64_data,
+                                        }
+                                    })
+                                else:
+                                    result_text += text
+                            elif hasattr(content, "type") and content.type == "image":
+                                # MCP ImageContent → Claude API image block
+                                if hasattr(content, "data") and hasattr(content, "mimeType"):
+                                    mime_map = {"image/jpeg": "image/jpeg", "image/png": "image/png",
+                                                "image/gif": "image/gif", "image/webp": "image/webp"}
+                                    media_type = mime_map.get(content.mimeType, "image/png")
+                                    image_blocks.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": content.data,
+                                        }
+                                    })
+
+                    # Check if the "successful" result is actually an auth error
+                    if mcp_service._is_auth_error_message(result_text):
+                        logger.warning(f"Auth error detected in tool result for {tool_use.name}: {result_text[:100]}")
+                        return {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": "AUTHENTICATION_ERROR: The user needs to reconnect their account. Do NOT fabricate data. Tell the user to reconnect in Settings.",
+                            "is_error": True,
+                        }
 
                     tool_calls_made.append({
                         "name": tool_use.name,
                         "arguments": tool_use.input,
                         "result": result_text[:200],
                     })
+
+                    # Build content: if images/PDFs present, use list format for Claude API
+                    if image_blocks or pdf_blocks:
+                        final_content = []
+                        if result_text:
+                            final_content.append({"type": "text", "text": result_text})
+                        final_content.extend(image_blocks)
+                        final_content.extend(pdf_blocks)
+                        return {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": final_content,
+                        }
 
                     return {
                         "type": "tool_result",
@@ -577,10 +630,18 @@ class ChatService:
                 except Exception as e:
                     error_msg = _format_exception_message(e)
                     logger.error(f"Tool call failed: {error_msg}")
+                    # Check if this is an auth error — use clear, structured message
+                    if mcp_service._is_auth_error_message(error_msg):
+                        return {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": "AUTHENTICATION_ERROR: The user needs to reconnect their account. Do NOT fabricate data. Tell the user to reconnect in Settings.",
+                            "is_error": True,
+                        }
                     return {
                         "type": "tool_result",
                         "tool_use_id": tool_use.id,
-                        "content": f"Error: {error_msg}",
+                        "content": f"TOOL_ERROR: {error_msg}. Do NOT make up data. Report this error to the user.",
                         "is_error": True,
                     }
 
@@ -746,10 +807,60 @@ class ChatService:
                     )
 
                     result_text = ""
+                    image_blocks = []
+                    pdf_blocks = []
                     if result:
                         for content in result:
                             if hasattr(content, "text"):
-                                result_text += content.text
+                                text = content.text
+                                if text.startswith("__PDF_BASE64__:"):
+                                    b64_data = text[len("__PDF_BASE64__:"):]
+                                    pdf_blocks.append({
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "application/pdf",
+                                            "data": b64_data,
+                                        }
+                                    })
+                                else:
+                                    result_text += text
+                            elif hasattr(content, "type") and content.type == "image":
+                                if hasattr(content, "data") and hasattr(content, "mimeType"):
+                                    mime_map = {"image/jpeg": "image/jpeg", "image/png": "image/png",
+                                                "image/gif": "image/gif", "image/webp": "image/webp"}
+                                    media_type = mime_map.get(content.mimeType, "image/png")
+                                    image_blocks.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": content.data,
+                                        }
+                                    })
+
+                    # Check if the "successful" result is actually an auth error
+                    if mcp_service._is_auth_error_message(result_text):
+                        logger.warning(f"Auth error detected in tool result for {tool_use.name}: {result_text[:100]}")
+                        return (tool_use, {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": "AUTHENTICATION_ERROR: The user needs to reconnect their account. Do NOT fabricate data. Tell the user to reconnect in Settings.",
+                            "is_error": True,
+                        }, "Authentication required - user needs to reconnect")
+
+                    # Build content with image/PDF support
+                    if image_blocks or pdf_blocks:
+                        final_content = []
+                        if result_text:
+                            final_content.append({"type": "text", "text": result_text})
+                        final_content.extend(image_blocks)
+                        final_content.extend(pdf_blocks)
+                        return (tool_use, {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": final_content,
+                        }, None)
 
                     return (tool_use, {
                         "type": "tool_result",
@@ -760,10 +871,18 @@ class ChatService:
                 except Exception as e:
                     error_msg = _format_exception_message(e)
                     logger.error(f"Tool call failed: {error_msg}")
+                    # Check if this is an auth error — use clear, structured message
+                    if mcp_service._is_auth_error_message(error_msg):
+                        return (tool_use, {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": "AUTHENTICATION_ERROR: The user needs to reconnect their account. Do NOT fabricate data. Tell the user to reconnect in Settings.",
+                            "is_error": True,
+                        }, "Authentication required - user needs to reconnect")
                     return (tool_use, {
                         "type": "tool_result",
                         "tool_use_id": tool_use.id,
-                        "content": f"Error: {error_msg}",
+                        "content": f"TOOL_ERROR: {error_msg}. Do NOT make up data. Report this error to the user.",
                         "is_error": True,
                     }, error_msg)
 
@@ -778,15 +897,19 @@ class ChatService:
             tool_results = []
             for tool_use, result_dict, error in parallel_results:
                 content = result_dict.get('content', '')
-                content_len = len(content) if content else 0
 
-                # Truncate if too large
-                if content_len > MAX_TOOL_RESULT_CHARS:
-                    truncated_content = content[:MAX_TOOL_RESULT_CHARS] + f"\n\n[... truncated {content_len - MAX_TOOL_RESULT_CHARS} chars for speed ...]"
-                    result_dict = {**result_dict, "content": truncated_content}
-                    logger.info(f"📋 Tool result for {tool_use.name}: TRUNCATED {content_len} -> {MAX_TOOL_RESULT_CHARS} chars")
+                # Only truncate text content, not image/PDF list content
+                if isinstance(content, str):
+                    content_len = len(content)
+                    if content_len > MAX_TOOL_RESULT_CHARS:
+                        truncated_content = content[:MAX_TOOL_RESULT_CHARS] + f"\n\n[... truncated {content_len - MAX_TOOL_RESULT_CHARS} chars for speed ...]"
+                        result_dict = {**result_dict, "content": truncated_content}
+                        logger.info(f"📋 Tool result for {tool_use.name}: TRUNCATED {content_len} -> {MAX_TOOL_RESULT_CHARS} chars")
+                    else:
+                        logger.info(f"📋 Tool result for {tool_use.name}: {content_len} chars - {content[:200]}...")
                 else:
-                    logger.info(f"📋 Tool result for {tool_use.name}: {content_len} chars - {content[:200]}...")
+                    # List content (images, PDFs) — log but don't truncate
+                    logger.info(f"📋 Tool result for {tool_use.name}: {len(content)} content blocks (multimodal)")
 
                 tool_results.append(result_dict)
                 if error:

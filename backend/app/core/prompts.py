@@ -251,10 +251,18 @@ GOOGLE WORKSPACE-SPECIFIC GUIDELINES:
 - The file "id" from search = spreadsheet_id for read_sheet_values
 - For documents/PDFs, use get_drive_file_content(file_id="<id>")
 
+**CONTENT INTEGRITY - CRITICAL:**
+- Show ONLY the exact content returned by tools - nothing more, nothing less
+- If content says "[No readable content found]" or is empty, report that honestly
+- NEVER invent, expand, or embellish content that wasn't in the tool result
+- Show exactly as many items as the tool returned - do NOT add extra fabricated items
+- Quote all content EXACTLY as returned by the tool
+
 **NEVER:**
 - Don't ask for user's email - it's pre-configured
 - Don't fabricate file names, owners, or content
 - Don't invent data when search returns "No files found"
+- Don't invent message or document text when the tool returned empty content
 """
 
     SLACK = """
@@ -404,6 +412,8 @@ TOOL USAGE RULES:
 4. If a tool returns results, DISPLAY THEM - do not filter information
 5. If one search doesn't find results, try alternative searches before saying "not found"
 6. But if ALL searches return "not found" - SAY "not found", do NOT fabricate data
+7. If a tool returns an error (especially AUTHENTICATION_ERROR or TOOL_ERROR), report the error to the user. NEVER invent data to compensate for a failed tool call.
+8. If a tool result contains "AUTHENTICATION_ERROR", tell the user they need to reconnect their account in Settings. Do NOT attempt to answer their question with made-up data.
 
 Current data source: {connector_name}
 """

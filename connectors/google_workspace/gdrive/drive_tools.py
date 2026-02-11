@@ -13,8 +13,10 @@ from pathlib import Path
 
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 import io
+import base64
 import httpx
 
+from mcp.types import TextContent, ImageContent
 from auth.service_decorator import require_google_service
 from auth.oauth_config import is_stateless_mode
 from core.utils import extract_office_xml_text, handle_http_errors
@@ -26,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD_CHUNK_SIZE_BYTES = 256 * 1024  # 256 KB
 UPLOAD_CHUNK_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB (Google recommended minimum)
+MAX_IMAGE_SIZE_BYTES = 15 * 1024 * 1024  # 15MB max for base64 encoding to Claude
+
+# Image types Claude can analyze via vision
+CLAUDE_VISION_MIME_TYPES = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
+
+# PDF type for document analysis
+PDF_MIME_TYPE = 'application/pdf'
+MAX_PDF_SIZE_BYTES = 30 * 1024 * 1024  # 30MB max for PDFs
 
 @server.tool()
 @handle_http_errors("search_drive_files", is_read_only=True, service_type="drive")
@@ -152,8 +162,38 @@ async def get_drive_file_content(
         status, done = await loop.run_in_executor(None, downloader.next_chunk)
 
     file_content_bytes = fh.getvalue()
+    file_size = len(file_content_bytes)
 
-    # Attempt Office XML extraction only for actual Office XML files
+    header = (
+        f'File: "{file_name}" (ID: {file_id}, Type: {mime_type})\n'
+        f'Link: {file_metadata.get("webViewLink", "#")}'
+    )
+
+    # --- IMAGE FILES: Return as ImageContent for Claude vision ---
+    if mime_type in CLAUDE_VISION_MIME_TYPES:
+        if file_size <= MAX_IMAGE_SIZE_BYTES:
+            logger.info(f"[get_drive_file_content] Returning image for vision analysis: {file_name} ({file_size} bytes)")
+            b64_data = base64.b64encode(file_content_bytes).decode('ascii')
+            return [
+                TextContent(type="text", text=f"{header}\n\n[Image provided below for analysis]"),
+                ImageContent(type="image", data=b64_data, mimeType=mime_type),
+            ]
+        else:
+            return f"{header}\n\n[Image too large for analysis ({file_size} bytes). View it at the link above.]"
+
+    # --- PDF FILES: Return base64 for Claude document analysis ---
+    if mime_type == PDF_MIME_TYPE:
+        if file_size <= MAX_PDF_SIZE_BYTES:
+            logger.info(f"[get_drive_file_content] Returning PDF for document analysis: {file_name} ({file_size} bytes)")
+            b64_data = base64.b64encode(file_content_bytes).decode('ascii')
+            return [
+                TextContent(type="text", text=f"{header}\n\n[PDF document provided below for analysis]"),
+                TextContent(type="text", text=f"__PDF_BASE64__:{b64_data}"),
+            ]
+        else:
+            return f"{header}\n\n[PDF too large for analysis ({file_size} bytes). View it at the link above.]"
+
+    # --- OFFICE FILES: Extract text from XML ---
     office_mime_types = {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -165,13 +205,12 @@ async def get_drive_file_content(
         if office_text:
             body_text = office_text
         else:
-            # Fallback: try UTF-8; otherwise flag binary
             try:
                 body_text = file_content_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 body_text = (
                     f"[Binary or unsupported text encoding for mimeType '{mime_type}' - "
-                    f"{len(file_content_bytes)} bytes]"
+                    f"{file_size} bytes]"
                 )
     else:
         # For non-Office files (including Google native files), try UTF-8 decode directly
@@ -180,15 +219,10 @@ async def get_drive_file_content(
         except UnicodeDecodeError:
             body_text = (
                 f"[Binary or unsupported text encoding for mimeType '{mime_type}' - "
-                f"{len(file_content_bytes)} bytes]"
+                f"{file_size} bytes]"
             )
 
-    # Assemble response
-    header = (
-        f'File: "{file_name}" (ID: {file_id}, Type: {mime_type})\n'
-        f'Link: {file_metadata.get("webViewLink", "#")}\n\n--- CONTENT ---\n'
-    )
-    return header + body_text
+    return f"{header}\n\n--- CONTENT ---\n{body_text}"
 
 
 @server.tool()
