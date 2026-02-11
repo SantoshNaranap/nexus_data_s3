@@ -10,7 +10,7 @@ import json
 logger = logging.getLogger(__name__)
 
 from app.models.chat import ChatRequest, ChatResponse, SessionCreate, Session
-from app.services.chat_service import chat_service
+from app.services.chat_service import chat_service, _anonymous_sessions
 from app.middleware.auth import get_current_user_optional as get_current_user
 from app.core.database import get_db
 from app.core.security import generate_session_id
@@ -279,15 +279,16 @@ async def send_message_stream(
 
 @router.get("/sessions", response_model=List[str])
 async def list_sessions():
-    """List all active chat sessions."""
-    return list(chat_service.sessions.keys())
+    """List all active anonymous chat sessions."""
+    return list(_anonymous_sessions.keys())
 
 
 @router.post("/sessions", response_model=dict)
 async def create_session(request: SessionCreate):
     """Create a new chat session."""
+    import time
     session_id = generate_session_id()
-    chat_service.sessions[session_id] = []
+    _anonymous_sessions[session_id] = {"messages": [], "last_accessed": time.time()}
 
     return {
         "session_id": session_id,
@@ -299,8 +300,8 @@ async def create_session(request: SessionCreate):
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a chat session."""
-    if session_id in chat_service.sessions:
-        del chat_service.sessions[session_id]
+    if session_id in _anonymous_sessions:
+        del _anonymous_sessions[session_id]
         return {"message": "Session deleted"}
 
     raise HTTPException(status_code=404, detail="Session not found")
@@ -337,8 +338,9 @@ async def get_session_info(
             }
         else:
             # Anonymous user - check in-memory
-            if session_id in chat_service.sessions:
-                messages = chat_service.sessions[session_id]
+            session_data = _anonymous_sessions.get(session_id)
+            if session_data:
+                messages = session_data.get("messages", [])
                 return {
                     "session_id": session_id,
                     "message_count": len(messages),

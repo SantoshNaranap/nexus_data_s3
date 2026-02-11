@@ -182,14 +182,21 @@ export const agentApi = {
       throw new Error('No response body');
     }
 
+    // Buffer for incomplete lines split across chunk boundaries
+    let buffer = '';
+
     try {
       while (true) {
         const { done, value } = await reader.read();
 
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        // Append new data to any leftover buffer from the previous chunk
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+
+        // The last element may be an incomplete line — keep it in the buffer
+        buffer = lines.pop() ?? '';
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {

@@ -5,6 +5,7 @@ interface MessageInputProps {
   input: string
   setInput: (value: string) => void
   isStreaming: boolean
+  isConfigured: boolean
   datasource: DataSource
   onSubmit: (e: React.FormEvent) => void
 }
@@ -13,6 +14,7 @@ export default function MessageInput({
   input,
   setInput,
   isStreaming,
+  isConfigured,
   datasource,
   onSubmit,
 }: MessageInputProps) {
@@ -26,14 +28,14 @@ export default function MessageInput({
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Ask me anything about ${datasource.name}...`}
+            placeholder={isConfigured ? `Ask me anything about ${datasource.name}...` : `Connect to ${datasource.name} to start chatting`}
             className="flex-1 bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white rounded-3xl px-5 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all placeholder-gray-500 dark:placeholder-gray-400 border border-transparent hover:border-gray-300 dark:hover:border-gray-700"
-            disabled={isStreaming}
+            disabled={isStreaming || !isConfigured}
             autoFocus
           />
           <button
             type="submit"
-            disabled={!input.trim() || isStreaming}
+            disabled={!input.trim() || isStreaming || !isConfigured}
             className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:cursor-not-allowed text-white p-3 rounded-full transition-all shadow-sm hover:shadow-md disabled:shadow-none"
             aria-label="Send message"
           >

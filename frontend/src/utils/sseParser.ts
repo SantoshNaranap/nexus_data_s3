@@ -33,14 +33,21 @@ export async function parseSSEStream<T = unknown>(
     throw new Error('No response body');
   }
 
+  // Buffer for incomplete lines split across chunk boundaries
+  let buffer = '';
+
   try {
     while (true) {
       const { done, value } = await reader.read();
 
       if (done) break;
 
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
+      // Append new data to any leftover buffer from the previous chunk
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+
+      // The last element may be an incomplete line — keep it in the buffer
+      buffer = lines.pop() ?? '';
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
@@ -48,7 +55,6 @@ export async function parseSSEStream<T = unknown>(
             const data = JSON.parse(line.slice(6));
             callbacks.onEvent({ type: data.type || data.event_type, data });
           } catch (parseError) {
-            // Ignore parse errors for partial JSON
             console.debug('Skipping malformed SSE line:', line);
           }
         }

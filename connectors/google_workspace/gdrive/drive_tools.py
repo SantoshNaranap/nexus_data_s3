@@ -780,3 +780,84 @@ async def update_drive_file(
     output_parts.append(f"View file: {updated_file.get('webViewLink', '#')}")
 
     return "\n".join(output_parts)
+
+
+@server.tool()
+@handle_http_errors("list_file_revisions", is_read_only=True, service_type="drive")
+@require_google_service("drive", "drive_read")
+async def list_file_revisions(
+    service,
+    user_google_email: str,
+    file_id: str,
+    page_size: int = 20,
+) -> str:
+    """
+    Lists the revision history of a Google Drive file, showing who edited it and when.
+
+    Returns file-level revisions (save points) with timestamps and editors.
+    Note: This shows file-level save history, not individual cell-level changes for Sheets.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        file_id (str): The ID of the file to get revisions for.
+        page_size (int): Maximum number of revisions to return. Defaults to 20.
+
+    Returns:
+        str: A formatted list of revisions with timestamps, editors, and sizes.
+    """
+    logger.info(f"[list_file_revisions] Invoked. File ID: '{file_id}', Email: '{user_google_email}'")
+
+    # Get file metadata first for context
+    file_metadata = await asyncio.to_thread(
+        service.files().get(
+            fileId=file_id,
+            fields="id, name, mimeType, webViewLink",
+            supportsAllDrives=True
+        ).execute
+    )
+    file_name = file_metadata.get("name", "Unknown File")
+
+    # List revisions
+    revisions_result = await asyncio.to_thread(
+        service.revisions().list(
+            fileId=file_id,
+            pageSize=page_size,
+            fields="revisions(id, modifiedTime, lastModifyingUser, size, exportLinks)",
+        ).execute
+    )
+
+    revisions = revisions_result.get("revisions", [])
+    if not revisions:
+        return f"No revision history available for '{file_name}' (ID: {file_id}).\nNote: Some file types may not track revisions."
+
+    output_parts = [
+        f"Revision history for: {file_name}",
+        f"File ID: {file_id}",
+        f"Type: {file_metadata.get('mimeType', 'Unknown')}",
+        f"Link: {file_metadata.get('webViewLink', '#')}",
+        f"Total revisions shown: {len(revisions)}",
+        "",
+    ]
+
+    for i, rev in enumerate(revisions, 1):
+        modified_time = rev.get("modifiedTime", "Unknown")
+        user_info = rev.get("lastModifyingUser", {})
+        editor_name = user_info.get("displayName", "Unknown")
+        editor_email = user_info.get("emailAddress", "")
+        size = rev.get("size")
+
+        editor_str = f"{editor_name}"
+        if editor_email:
+            editor_str += f" ({editor_email})"
+
+        size_str = ""
+        if size:
+            size_kb = int(size) / 1024
+            if size_kb >= 1024:
+                size_str = f", Size: {size_kb / 1024:.1f} MB"
+            else:
+                size_str = f", Size: {size_kb:.1f} KB"
+
+        output_parts.append(f"  {i}. {modified_time} — {editor_str}{size_str}")
+
+    return "\n".join(output_parts)

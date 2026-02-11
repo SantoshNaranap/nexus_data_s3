@@ -11,9 +11,10 @@ interface ChatInterfaceProps {
   datasource: DataSource
   isConfigured: boolean
   connectedAccount?: string | null
+  onOpenSettings: () => void
 }
 
-export default function ChatInterface({ datasource, isConfigured, connectedAccount }: ChatInterfaceProps) {
+export default function ChatInterface({ datasource, isConfigured, connectedAccount, onOpenSettings }: ChatInterfaceProps) {
   const [showAgentPanel, setShowAgentPanel] = useState(true)
 
   const {
@@ -51,7 +52,7 @@ export default function ChatInterface({ datasource, isConfigured, connectedAccou
         {/* Messages */}
         {messages.length === 0 && !isStreaming ? (
           <div className="flex-1 overflow-y-auto p-6">
-            <EmptyState datasource={datasource} />
+            <EmptyState datasource={datasource} isConfigured={isConfigured} onOpenSettings={onOpenSettings} />
           </div>
         ) : (
           <MessageList
@@ -69,6 +70,7 @@ export default function ChatInterface({ datasource, isConfigured, connectedAccou
           input={input}
           setInput={setInput}
           isStreaming={isStreaming}
+          isConfigured={isConfigured}
           datasource={datasource}
           onSubmit={handleSubmit}
         />

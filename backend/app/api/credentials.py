@@ -69,6 +69,38 @@ async def save_credentials(
         )
 
 
+async def _try_refresh_expired_token(
+    datasource: str,
+    credentials: dict,
+    db: AsyncSession,
+    user_id: Optional[str],
+    session_id: Optional[str],
+) -> Optional[dict]:
+    """Try to refresh an expired OAuth token. Returns updated credentials or None."""
+    ds = datasource.lower()
+    try:
+        if ds == "jira" and credentials.get("jira_refresh_token"):
+            updated = await user_oauth_service.refresh_jira_credentials(credentials)
+        elif ds == "google_workspace" and credentials.get("google_refresh_token"):
+            updated = await user_oauth_service.refresh_google_credentials(credentials)
+        else:
+            return None
+
+        if updated:
+            await credential_service.save_credentials(
+                datasource=datasource,
+                credentials=updated,
+                db=db,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            logger.info(f"Proactively refreshed {datasource} token during status check")
+            return updated
+    except Exception as e:
+        logger.warning(f"Failed to refresh {datasource} token during status check: {e}")
+    return None
+
+
 @router.get("/{datasource}/status")
 async def get_credentials_status(
     datasource: str,
@@ -141,7 +173,15 @@ async def get_credentials_status(
                     expires_at = token_expiry.isoformat()
 
                     if token_expiry < datetime.now(timezone.utc):
-                        status = "expired"
+                        # Token expired — try to refresh before reporting as expired
+                        refreshed = await _try_refresh_expired_token(
+                            datasource, credentials, db, user_id, session_id
+                        )
+                        if refreshed:
+                            status = "connected"
+                            expires_at = refreshed.get("expires_at", expires_at)
+                        else:
+                            status = "expired"
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Could not parse expires_at for {datasource}: {e}")
 

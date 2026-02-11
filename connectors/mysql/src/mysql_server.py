@@ -8,6 +8,7 @@ Provides MCP tools for interacting with MySQL databases.
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import mysql.connector
@@ -18,6 +19,32 @@ from mcp.types import Tool, TextContent
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mysql-mcp-server")
+
+# Regex for valid MySQL identifiers: letters, digits, underscores, hyphens (no backticks, quotes, semicolons)
+_VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
+
+# Dangerous SQL patterns that indicate multi-statement or write operations
+_DANGEROUS_SQL = re.compile(
+    r"(;|\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|GRANT|REVOKE|CALL|EXEC|EXECUTE|SET|LOAD|INTO\s+OUTFILE|INTO\s+DUMPFILE)\b)",
+    re.IGNORECASE,
+)
+
+
+def _validate_identifier(name: str, kind: str = "identifier") -> str:
+    """Validate a SQL identifier (table/database name) to prevent injection.
+
+    Only allows alphanumeric characters, underscores, and hyphens.
+    Raises ValueError if the identifier is invalid.
+    """
+    if not name or not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid {kind} name: '{name}'. "
+            f"Only letters, digits, underscores, and hyphens are allowed."
+        )
+    if len(name) > 64:  # MySQL max identifier length
+        raise ValueError(f"{kind} name too long (max 64 characters): '{name}'")
+    return name
+
 
 # Create MCP server
 app = Server("mysql-connector")
@@ -191,6 +218,7 @@ async def handle_list_tables(arguments: dict[str, Any]) -> list[TextContent]:
     try:
         database = arguments.get("database")
         if database:
+            _validate_identifier(database, "database")
             cursor.execute(f"USE `{database}`")
 
         cursor.execute("SHOW TABLES")
@@ -218,27 +246,29 @@ async def handle_describe_table(arguments: dict[str, Any]) -> list[TextContent]:
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _validate_identifier(arguments["table"], "table")
         database = arguments.get("database")
 
         if database:
+            _validate_identifier(database, "database")
             cursor.execute(f"USE `{database}`")
 
         cursor.execute(f"DESCRIBE `{table}`")
         columns = cursor.fetchall()
 
-        # Get foreign keys
+        # Get foreign keys (parameterized query to prevent injection)
         cursor.execute(
-            f"""
+            """
             SELECT
                 COLUMN_NAME,
                 REFERENCED_TABLE_NAME,
                 REFERENCED_COLUMN_NAME
             FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
             WHERE TABLE_SCHEMA = DATABASE()
-                AND TABLE_NAME = '{table}'
+                AND TABLE_NAME = %s
                 AND REFERENCED_TABLE_NAME IS NOT NULL
-        """
+        """,
+            (table,),
         )
         foreign_keys = cursor.fetchall()
 
@@ -255,16 +285,28 @@ async def handle_describe_table(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def handle_execute_query(arguments: dict[str, Any]) -> list[TextContent]:
-    """Execute a SELECT query."""
+    """Execute a SELECT query (read-only, single statement only)."""
     query = arguments["query"].strip()
     limit = arguments.get("limit", 100)
+
+    # Security: strip trailing semicolons (common in LLM-generated SQL)
+    query = query.rstrip(";").strip()
 
     # Security: Ensure only SELECT queries
     if not query.upper().startswith("SELECT"):
         return [
             TextContent(
                 type="text",
-                text="Error: Only SELECT queries are allowed for security reasons",
+                text="Error: Only SELECT queries are allowed for security reasons.",
+            )
+        ]
+
+    # Security: Block dangerous patterns (multi-statement, write operations, file access)
+    if _DANGEROUS_SQL.search(query):
+        return [
+            TextContent(
+                type="text",
+                text="Error: Query contains disallowed operations. Only simple SELECT queries are permitted.",
             )
         ]
 
@@ -297,18 +339,19 @@ async def handle_get_table_stats(arguments: dict[str, Any]) -> list[TextContent]
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _validate_identifier(arguments["table"], "table")
         database = arguments.get("database")
 
         if database:
+            _validate_identifier(database, "database")
             cursor.execute(f"USE `{database}`")
 
         # Get row count
         cursor.execute(f"SELECT COUNT(*) as row_count FROM `{table}`")
         row_count = cursor.fetchone()["row_count"]
 
-        # Get table status
-        cursor.execute(f"SHOW TABLE STATUS LIKE '{table}'")
+        # Get table status (parameterized LIKE pattern)
+        cursor.execute("SHOW TABLE STATUS LIKE %s", (table,))
         status = cursor.fetchone()
 
         result = {
@@ -334,10 +377,11 @@ async def handle_get_table_indexes(arguments: dict[str, Any]) -> list[TextConten
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _validate_identifier(arguments["table"], "table")
         database = arguments.get("database")
 
         if database:
+            _validate_identifier(database, "database")
             cursor.execute(f"USE `{database}`")
 
         cursor.execute(f"SHOW INDEX FROM `{table}`")

@@ -10,7 +10,6 @@ import logging
 import asyncio
 import time
 import random
-import functools
 from typing import List, AsyncGenerator, Optional
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,7 +28,8 @@ from app.services.claude_client import get_quirky_thinking_message
 logger = logging.getLogger(__name__)
 
 # Thread pool for running synchronous Anthropic streaming in background
-_stream_executor = ThreadPoolExecutor(max_workers=10)
+# Each concurrent streaming chat uses one thread; size limits max concurrent streams
+_stream_executor = ThreadPoolExecutor(max_workers=50)
 
 # In-memory session storage for anonymous users (no database)
 # Key: session_id, Value: {"messages": [...], "last_accessed": float}
@@ -110,40 +110,6 @@ async def retry_on_overload_async(coro_func, *args, max_retries=3, base_delay=1.
                 raise
     logger.error(f"Claude API still overloaded after {max_retries} retries")
     raise last_error or Exception("Claude API overloaded - please try again in a moment")
-
-
-def retry_on_overload(func):
-    """Sync decorator for retrying Claude API calls on overload errors."""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        max_retries = 3
-        base_delay = 1.0
-        last_error = None
-
-        for attempt in range(max_retries):
-            try:
-                return func(*args, **kwargs)
-            except APIStatusError as e:
-                if e.status_code == 529 or "overloaded" in str(e).lower():
-                    last_error = e
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                else:
-                    raise
-            except Exception as e:
-                if "overloaded" in str(e).lower():
-                    last_error = e
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                else:
-                    raise
-
-        logger.error(f"Claude API still overloaded after {max_retries} retries")
-        raise last_error or Exception("Claude API overloaded - please try again in a moment")
-
-    return wrapper
 
 
 class ChatService:
@@ -552,16 +518,14 @@ class ChatService:
                     else:
                         return f"The tool '{names[0]}' was called multiple times without making progress. Please try rephrasing your query.", tool_calls_made
 
-            @retry_on_overload
-            def call_claude_api():
-                return self.client.messages.create(
-                    model=model,
-                    max_tokens=4096,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tools if tools else None,
-                )
-            response = call_claude_api()
+            response = await retry_on_overload_async(
+                self.client.messages.create,
+                model=model,
+                max_tokens=4096,
+                system=system_prompt,
+                messages=messages,
+                tools=tools if tools else None,
+            )
 
             tool_use_blocks = [
                 block for block in response.content if isinstance(block, ToolUseBlock)
