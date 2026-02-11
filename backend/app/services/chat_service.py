@@ -40,6 +40,67 @@ _SESSION_MAX_COUNT = 500  # Max total sessions to prevent unbounded growth
 _last_cleanup_time = 0.0
 
 
+def _extract_multimodal_content(result, logger, tool_name=""):
+    """Extract text, image, and PDF content from MCP tool result blocks.
+
+    MCP tool results can contain TextContent, ImageContent, etc.
+    This function handles all types and converts images/PDFs to Claude API format.
+    """
+    result_text = ""
+    image_blocks = []
+    pdf_blocks = []
+
+    CLAUDE_MIME_MAP = {
+        "image/jpeg": "image/jpeg", "image/png": "image/png",
+        "image/gif": "image/gif", "image/webp": "image/webp",
+    }
+
+    if not result:
+        return result_text, image_blocks, pdf_blocks
+
+    for content in result:
+        content_type = getattr(content, "type", None)
+        logger.debug(f"[multimodal] {tool_name}: block type={content_type}, class={type(content).__name__}, attrs={[a for a in dir(content) if not a.startswith('_')][:10]}")
+
+        if content_type == "image":
+            # MCP ImageContent → Claude API image block
+            data = getattr(content, "data", None)
+            mime = getattr(content, "mimeType", None)
+            if data and mime:
+                media_type = CLAUDE_MIME_MAP.get(mime, "image/png")
+                image_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    }
+                })
+                logger.info(f"[multimodal] {tool_name}: captured image block ({mime}, {len(data)} chars base64)")
+            else:
+                logger.warning(f"[multimodal] {tool_name}: image block missing data/mimeType: data={bool(data)}, mime={mime}")
+        elif hasattr(content, "text"):
+            text = content.text
+            if text.startswith("__PDF_BASE64__:"):
+                b64_data = text[len("__PDF_BASE64__:"):]
+                pdf_blocks.append({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": b64_data,
+                    }
+                })
+                logger.info(f"[multimodal] {tool_name}: captured PDF block ({len(b64_data)} chars base64)")
+            else:
+                result_text += text
+        else:
+            logger.warning(f"[multimodal] {tool_name}: unhandled content block type={content_type}, class={type(content).__name__}")
+
+    logger.info(f"[multimodal] {tool_name}: extracted {len(result_text)} chars text, {len(image_blocks)} images, {len(pdf_blocks)} PDFs")
+    return result_text, image_blocks, pdf_blocks
+
+
 def _cleanup_expired_sessions() -> None:
     """Remove expired anonymous sessions. Called periodically."""
     global _last_cleanup_time
@@ -557,40 +618,7 @@ class ChatService:
                         db=db,
                     )
 
-                    result_text = ""
-                    image_blocks = []
-                    pdf_blocks = []
-                    if result:
-                        for content in result:
-                            if hasattr(content, "text"):
-                                text = content.text
-                                # Check for PDF base64 marker from Drive connector
-                                if text.startswith("__PDF_BASE64__:"):
-                                    b64_data = text[len("__PDF_BASE64__:"):]
-                                    pdf_blocks.append({
-                                        "type": "document",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": "application/pdf",
-                                            "data": b64_data,
-                                        }
-                                    })
-                                else:
-                                    result_text += text
-                            elif hasattr(content, "type") and content.type == "image":
-                                # MCP ImageContent → Claude API image block
-                                if hasattr(content, "data") and hasattr(content, "mimeType"):
-                                    mime_map = {"image/jpeg": "image/jpeg", "image/png": "image/png",
-                                                "image/gif": "image/gif", "image/webp": "image/webp"}
-                                    media_type = mime_map.get(content.mimeType, "image/png")
-                                    image_blocks.append({
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type,
-                                            "data": content.data,
-                                        }
-                                    })
+                    result_text, image_blocks, pdf_blocks = _extract_multimodal_content(result, logger, tool_use.name)
 
                     # Check if the "successful" result is actually an auth error
                     if mcp_service._is_auth_error_message(result_text):
@@ -806,38 +834,7 @@ class ChatService:
                         db=db,
                     )
 
-                    result_text = ""
-                    image_blocks = []
-                    pdf_blocks = []
-                    if result:
-                        for content in result:
-                            if hasattr(content, "text"):
-                                text = content.text
-                                if text.startswith("__PDF_BASE64__:"):
-                                    b64_data = text[len("__PDF_BASE64__:"):]
-                                    pdf_blocks.append({
-                                        "type": "document",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": "application/pdf",
-                                            "data": b64_data,
-                                        }
-                                    })
-                                else:
-                                    result_text += text
-                            elif hasattr(content, "type") and content.type == "image":
-                                if hasattr(content, "data") and hasattr(content, "mimeType"):
-                                    mime_map = {"image/jpeg": "image/jpeg", "image/png": "image/png",
-                                                "image/gif": "image/gif", "image/webp": "image/webp"}
-                                    media_type = mime_map.get(content.mimeType, "image/png")
-                                    image_blocks.append({
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type,
-                                            "data": content.data,
-                                        }
-                                    })
+                    result_text, image_blocks, pdf_blocks = _extract_multimodal_content(result, logger, tool_use.name)
 
                     # Check if the "successful" result is actually an auth error
                     if mcp_service._is_auth_error_message(result_text):

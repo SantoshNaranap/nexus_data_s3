@@ -118,7 +118,7 @@ async def get_drive_file_content(
     service,
     user_google_email: str,
     file_id: str,
-) -> str:
+):
     """
     Retrieves the content of a specific Google Drive file by ID, supporting files in shared drives.
 
