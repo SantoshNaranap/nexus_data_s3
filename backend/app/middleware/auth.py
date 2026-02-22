@@ -88,7 +88,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    logger.debug(f"User authenticated: {user.email}")
+    logger.info(f"User authenticated from token: {user.email} (id={user.id[:8]}...)")
     return user
 
 

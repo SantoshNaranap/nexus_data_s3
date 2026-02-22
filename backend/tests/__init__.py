@@ -1,1 +1,1 @@
-"""Backend tests."""
+"""Test suite for ConnectorMCP backend."""

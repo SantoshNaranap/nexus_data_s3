@@ -91,8 +91,15 @@ class JiraQueryParser:
 
         return None
 
-    def _match_assignee(self, query: str, project_key: Optional[str] = None) -> Optional[str]:
-        """Match person name in query to assignee."""
+    def _match_assignee(self, query: str, project_key: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+        """Match person name in query to assignee.
+
+        Returns:
+            tuple: (matched_assignee_or_none, extracted_name_if_not_found_or_none)
+            - If match found: (assignee_name, None)
+            - If name extracted but not found: (None, extracted_name)
+            - If no name in query: (None, None)
+        """
         assignees = self._get_assignees(project_key)
         query_lower = query.lower()
 
@@ -118,12 +125,12 @@ class JiraQueryParser:
                 extracted_name = None  # Reset if it was a common word
 
         if not extracted_name:
-            return None
+            return (None, None)
 
         # Try exact match (case-insensitive)
         for assignee in assignees:
             if extracted_name.lower() in assignee.lower():
-                return assignee
+                return (assignee, None)
 
         # Try fuzzy match on first names
         assignee_first_names = [a.split()[0].lower() for a in assignees]
@@ -131,9 +138,10 @@ class JiraQueryParser:
         if matches:
             for i, first_name in enumerate(assignee_first_names):
                 if first_name == matches[0]:
-                    return assignees[i]
+                    return (assignees[i], None)
 
-        return None
+        # Name was extracted from query but not found in assignees
+        return (None, extracted_name)
 
     def _detect_status_filter(self, query: str) -> Optional[str]:
         """Detect status filters in query."""
@@ -183,6 +191,43 @@ class JiraQueryParser:
         count_keywords = ["how many", "count", "number of"]
         return any(keyword in query_lower for keyword in count_keywords)
 
+    def _detect_schedule_filter(self, query: str) -> Optional[str]:
+        """Detect schedule/deadline related queries."""
+        query_lower = query.lower()
+
+        # Behind schedule / overdue patterns
+        overdue_keywords = [
+            "behind schedule", "overdue", "past due", "past deadline",
+            "late", "delayed", "slipping", "missed deadline"
+        ]
+        for keyword in overdue_keywords:
+            if keyword in query_lower:
+                # Issues past their due date and not completed
+                return 'duedate < now() AND status != Done AND status != Closed'
+
+        # Due soon / at risk patterns
+        at_risk_keywords = ["at risk", "due soon", "deadline coming", "due this week"]
+        for keyword in at_risk_keywords:
+            if keyword in query_lower:
+                return 'duedate >= now() AND duedate <= endOfWeek() AND status != Done AND status != Closed'
+
+        # Has due date but no specific filter
+        if "due date" in query_lower or "deadline" in query_lower:
+            return 'duedate is not EMPTY'
+
+        return None
+
+    def _detect_blocked_filter(self, query: str) -> Optional[str]:
+        """Detect blocked/stuck issue queries."""
+        query_lower = query.lower()
+
+        blocked_keywords = ["blocked", "stuck", "impediment", "waiting", "on hold"]
+        for keyword in blocked_keywords:
+            if keyword in query_lower:
+                return 'status = Blocked OR labels = blocked OR labels = impediment'
+
+        return None
+
     def parse(self, query: str) -> Dict[str, Any]:
         """
         Parse natural language query into structured data.
@@ -191,20 +236,32 @@ class JiraQueryParser:
             {
                 "jql": "generated JQL query",
                 "is_count": bool,
+                "is_schedule_query": bool,
+                "person_not_found": str or None (name that was searched but not found),
                 "matched_entities": {
                     "project": str or None,
                     "assignee": str or None,
                     "status": str or None,
                     "type": str or None,
+                    "schedule": str or None,
+                    "blocked": str or None,
                 }
             }
         """
         # Extract entities
         project_key = self._match_project(query)
-        assignee = self._match_assignee(query, project_key)
-        status_filter = self._detect_status_filter(query)
+        assignee, person_not_found = self._match_assignee(query, project_key)
         type_filter = self._detect_issue_type(query)
         is_count = self._detect_count_query(query)
+
+        # Check for schedule/deadline related queries FIRST (takes priority over status)
+        schedule_filter = self._detect_schedule_filter(query)
+        blocked_filter = self._detect_blocked_filter(query)
+
+        # Only apply default status filter if not a schedule or blocked query
+        status_filter = None
+        if not schedule_filter and not blocked_filter:
+            status_filter = self._detect_status_filter(query)
 
         # Build JQL
         jql_parts = []
@@ -215,7 +272,12 @@ class JiraQueryParser:
         if assignee:
             jql_parts.append(f'assignee = "{assignee}"')
 
-        if status_filter:
+        # Priority: schedule filter > blocked filter > status filter
+        if schedule_filter:
+            jql_parts.append(f"({schedule_filter})")
+        elif blocked_filter:
+            jql_parts.append(f"({blocked_filter})")
+        elif status_filter:
             jql_parts.append(status_filter)
 
         if type_filter:
@@ -230,10 +292,14 @@ class JiraQueryParser:
         return {
             "jql": jql,
             "is_count": is_count,
+            "is_schedule_query": schedule_filter is not None,
+            "person_not_found": person_not_found,
             "matched_entities": {
                 "project": project_key,
                 "assignee": assignee,
                 "status": status_filter,
                 "type": type_filter,
+                "schedule": schedule_filter,
+                "blocked": blocked_filter,
             },
         }

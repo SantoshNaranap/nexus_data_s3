@@ -100,11 +100,13 @@ async def get_credentials_status(
     try:
         if user:
             # Check for authenticated user
+            logger.info(f"Checking credentials status for datasource={datasource}, user={user.email} (id={user.id[:8]}...)")
             has_credentials = await credential_service.has_credentials(
                 datasource=datasource,
                 db=db,
                 user_id=user.id,
             )
+            logger.info(f"Credentials status for {datasource}: configured={has_credentials} for user={user.email}")
         else:
             # Check for anonymous user
             session_id = req.cookies.get("session_id")

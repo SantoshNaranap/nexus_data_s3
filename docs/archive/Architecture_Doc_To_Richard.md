@@ -1,0 +1,178 @@
+# Mosaic Platform - Architecture Overview
+
+**Prepared for:** Richard | **Version:** 2.0 | **December 2025**
+
+---
+
+## What is Mosaic?
+
+Mosaic is an AI assistant that connects to all your business tools and answers questions in plain English.
+
+**Instead of** logging into Slack, JIRA, databases, and Google Drive separately...
+**You ask:** *"What did the team discuss about the product launch?"*
+**You get:** A complete summary in seconds.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│   YOU                           MOSAIC                      YOUR DATA    │
+│                                                                          │
+│  "What did Sarah      ───►    Understands     ───►     ┌──────────┐     │
+│   say about the               your question            │  Slack   │     │
+│   budget?"                          │                  │  JIRA    │     │
+│                                     │                  │  MySQL   │     │
+│                                     ▼                  │  Gmail   │     │
+│                              Fetches data    ◄───      │  Drive   │     │
+│                                     │                  └──────────┘     │
+│  "Sarah proposed a    ◄───   Summarizes                                 │
+│   15% increase on             results                                   │
+│   Monday..."                                                            │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## How It Works
+
+### The Simple Flow
+
+```
+1. USER ASKS          2. AI UNDERSTANDS        3. DATA FETCHED        4. ANSWER DELIVERED
+─────────────         ───────────────          ─────────────          ─────────────────
+
+"What did             WHO: Ananth              Slack API:             "Ananth said the
+ Ananth say?"         WHAT: Messages           → Find user            feature is ready
+                      ACTION: Read DM          → Get conversation     for testing..."
+                                               → Return 30 messages
+```
+
+### Three-Tier Intelligence
+
+Not every question needs full AI power. Simple questions get instant answers.
+
+```
+                         QUERY COMPLEXITY
+                               │
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+        ▼                      ▼                      ▼
+   ┌─────────┐           ┌─────────┐           ┌─────────┐
+   │ TIER 1  │           │ TIER 2  │           │ TIER 3  │
+   │ DIRECT  │           │ HAIKU   │           │ SONNET  │
+   │  ~5ms   │           │ ~400ms  │           │ ~1500ms │
+   └─────────┘           └─────────┘           └─────────┘
+
+   "list channels"       "what did X say"      "compare what X
+   "show users"          "find emails about"    and Y discussed"
+
+   30% of queries        50% of queries        20% of queries
+   Pattern matching      Fast AI routing       Full AI reasoning
+```
+
+---
+
+## System Architecture
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  LAYER 1: USER INTERFACE                                                  ║
+║  React + TypeScript web app                                               ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+                                    │ HTTPS
+                                    ▼
+╠═══════════════════════════════════════════════════════════════════════════╣
+║  LAYER 2: INTELLIGENCE ENGINE                                             ║
+║  Python/FastAPI backend + Claude AI (Haiku for routing, Sonnet for logic) ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+                                    │ MCP Protocol
+                                    ▼
+╠═══════════════════════════════════════════════════════════════════════════╣
+║  LAYER 3: CONNECTORS                                                      ║
+║  ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐  ║
+║  │ Slack │ │  S3   │ │ JIRA  │ │ MySQL │ │Google │ │Shopify│ │GitHub │  ║
+║  └───────┘ └───────┘ └───────┘ └───────┘ └───────┘ └───────┘ └───────┘  ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+                                    │ Native APIs
+                                    ▼
+╠═══════════════════════════════════════════════════════════════════════════╣
+║  LAYER 4: YOUR DATA SOURCES                                               ║
+║  Slack, AWS, Atlassian, Databases, Google Workspace, Shopify, GitHub      ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+## Security
+
+### Five Layers of Protection
+
+| Layer | What It Does |
+|-------|--------------|
+| **Network** | All traffic encrypted (TLS 1.3) |
+| **Authentication** | JWT tokens + Google OAuth |
+| **Credential Storage** | Your API keys encrypted with AES-128 |
+| **Data Isolation** | Each user only sees their own data |
+| **Input Validation** | SQL injection & XSS protection |
+
+### What We Store vs. Don't Store
+
+| Stored | NOT Stored |
+|--------|------------|
+| Your API keys (encrypted) | Your Slack messages |
+| Chat history | Your database contents |
+| User preferences | Your files |
+
+**Your data stays in your systems.** Mosaic only accesses it when you ask a question.
+
+---
+
+## Performance
+
+| Query Type | Example | Response Time |
+|------------|---------|---------------|
+| Simple | "List channels" | ~0.5s |
+| Person lookup | "What did Sarah say?" | ~5s |
+| Search | "Find budget discussions" | ~8s |
+| Weekly summary | "Catch me up" | ~15s |
+
+### Key Optimizations
+
+- **Direct routing** skips AI for simple queries (30% of traffic)
+- **Tool caching** saves 200ms per request
+- **Parallel execution** runs multiple tools simultaneously
+- **Auto-retry** handles temporary API overloads seamlessly
+
+---
+
+## Technology Stack
+
+| Component | Technology |
+|-----------|------------|
+| Frontend | React, TypeScript, TailwindCSS |
+| Backend | Python, FastAPI, SQLAlchemy |
+| AI | Claude Haiku (fast) + Sonnet (powerful) |
+| Security | JWT, Fernet (AES-128), OAuth 2.0 |
+| Infrastructure | Docker, Vercel, Railway |
+
+---
+
+## Summary
+
+**Mosaic = One chat interface for all your data**
+
+| What You Get | The Benefit |
+|--------------|-------------|
+| Natural language queries | No coding required |
+| 7+ data sources | One place for everything |
+| Intelligent routing | Fast answers when possible |
+| Enterprise security | Encrypted, isolated, auditable |
+| Real-time responses | See answers as they stream |
+
+> *"Ask anything, from anywhere, in plain English."*
+
+---
+
+**Questions?** Let's discuss.
+
+*Built by Kaay Labs | December 2025*

@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from anthropic.types import ToolUseBlock, TextBlock
 
+from app.core.config import settings
 from app.services.claude_client import claude_client, get_quirky_thinking_message
 from app.services.mcp_service import mcp_service
 from app.services.parameter_injection_service import parameter_injection_service
@@ -28,7 +29,11 @@ from app.services.parameter_injection_service import parameter_injection_service
 logger = logging.getLogger(__name__)
 
 # Thread pool for running synchronous streaming in background
-_executor = ThreadPoolExecutor(max_workers=10)
+# Size is configurable via settings for scalability
+_executor = ThreadPoolExecutor(
+    max_workers=settings.stream_thread_pool_size,
+    thread_name_prefix="claude_interact_"
+)
 
 # Performance tracking
 LLM_METRICS = {
@@ -79,14 +84,17 @@ class ClaudeInteractionService:
         tool_calls_made = []
 
         for iteration in range(self.max_iterations):
-            # Call Claude
-            response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
-                system=system_prompt,
-                messages=messages,
-                tools=tools if tools else None,
-            )
+            # Call Claude - only include tools param if we have tools
+            create_kwargs = {
+                "model": "claude-sonnet-4-5-20250929",
+                "max_tokens": 4096,
+                "system": system_prompt,
+                "messages": messages,
+            }
+            if tools:  # Only add tools if non-empty list
+                create_kwargs["tools"] = tools
+
+            response = self.client.messages.create(**create_kwargs)
 
             # Check if Claude wants to use tools
             tool_use_blocks = [
@@ -175,13 +183,17 @@ class ClaudeInteractionService:
             def run_stream():
                 """Run the synchronous stream in a thread."""
                 try:
-                    stream = self.client.messages.stream(
-                        model="claude-sonnet-4-5-20250929",
-                        max_tokens=16000,
-                        system=system_prompt,
-                        messages=messages,
-                        tools=tools if tools else None,
-                    )
+                    # Build kwargs - only include tools if non-empty list
+                    stream_kwargs = {
+                        "model": "claude-sonnet-4-5-20250929",
+                        "max_tokens": 16000,
+                        "system": system_prompt,
+                        "messages": messages,
+                    }
+                    if tools:  # Only add tools if non-empty list
+                        stream_kwargs["tools"] = tools
+
+                    stream = self.client.messages.stream(**stream_kwargs)
 
                     first_token = True
                     with stream as event_stream:

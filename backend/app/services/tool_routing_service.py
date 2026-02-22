@@ -68,14 +68,20 @@ class ToolRoutingService:
                 },
             ],
             "jira": [
+                # ONLY list projects for simple listing requests - NOT analytical queries
                 {
-                    "keywords": ["project", "projects", "list project", "show project", "what project"],
+                    "keywords": ["list project", "show project", "what project do i have",
+                                "my projects", "all projects", "available projects"],
                     "tool": "list_projects",
                     "args": {},
                 },
+                # Route ALL analytical/complex queries to query_jira
                 {
                     "keywords": ["working on", "assigned", "issue", "task", "sprint", "backlog",
-                                "bug", "story", "ticket", "open", "closed", "status", "who"],
+                                "bug", "story", "ticket", "open", "closed", "status", "who",
+                                "behind schedule", "overdue", "at risk", "delayed", "blocked",
+                                "deadline", "due date", "late", "slipping", "progress", "health",
+                                "how many", "count", "summary", "report", "analyze"],
                     "tool": "query_jira",
                     "args": {},
                     "args_from_message": True,  # Use message as query
@@ -88,22 +94,15 @@ class ToolRoutingService:
                     "args": {},
                 },
             ],
+            # Google Workspace - only use direct routing for simple list queries
+            # For searches with specific terms, let Claude handle it to extract the query
             "google_workspace": [
                 {
-                    "keywords": ["calendar", "event", "meeting", "schedule"],
+                    "keywords": ["calendar today", "my calendar", "today's calendar", "meetings today"],
                     "tool": "get_events",
                     "args": {},
                 },
-                {
-                    "keywords": ["email", "mail", "inbox", "gmail"],
-                    "tool": "list_messages",
-                    "args": {},
-                },
-                {
-                    "keywords": ["drive", "file", "doc", "sheet", "document"],
-                    "tool": "search_drive_files",
-                    "args": {},
-                },
+                # Removed email/drive direct routing - let Claude extract search queries properly
             ],
             "shopify": [
                 {
@@ -118,29 +117,19 @@ class ToolRoutingService:
                 },
             ],
             "slack": [
+                # Only route very simple queries - let Claude handle anything with names
                 {
-                    "keywords": ["channel", "channels", "list channel", "show channel", "what channel"],
+                    "keywords": ["list channel", "show channel", "what channel", "all channels"],
                     "tool": "list_channels",
                     "args": {},
                 },
                 {
-                    "keywords": ["user", "users", "who", "team", "people", "members"],
+                    "keywords": ["list user", "show user", "team member", "all member", "who is on the team"],
                     "tool": "list_users",
                     "args": {},
                 },
-                {
-                    "keywords": ["message", "messages", "read", "recent", "latest", "what's happening",
-                                "catch up", "activity"],
-                    "tool": "read_messages",
-                    "args": {},
-                    "args_from_message": True,
-                },
-                {
-                    "keywords": ["search", "find", "look for"],
-                    "tool": "search_messages",
-                    "args": {},
-                    "args_from_message": True,
-                },
+                # DO NOT route: "what is X doing", "X's messages", etc - those need get_user_activity
+                # DO NOT route: anything with a person's name - Claude needs to extract the name
             ],
             "github": [
                 {
@@ -194,6 +183,24 @@ class ToolRoutingService:
         """
         message_lower = message.lower().strip()
         patterns = self._direct_patterns.get(datasource, [])
+
+        # JIRA-specific: Don't route to list_projects if analytical keywords are present
+        if datasource == "jira":
+            analytical_keywords = [
+                "behind schedule", "overdue", "at risk", "delayed", "blocked",
+                "deadline", "due date", "late", "slipping", "progress", "health",
+                "status", "stuck", "review", "open", "closed", "bug", "issue",
+                "working on", "assigned", "how many", "count", "analyze", "report"
+            ]
+            has_analytical_keyword = any(kw in message_lower for kw in analytical_keywords)
+            if has_analytical_keyword:
+                # Skip list_projects pattern, go directly to query_jira
+                for pattern in patterns:
+                    if pattern.get("tool") == "query_jira":
+                        args = {"query": message}
+                        ROUTING_METRICS["direct_routing_count"] += 1
+                        logger.info(f"⚡⚡ DIRECT routing to query_jira (analytical query detected)")
+                        return [{"tool": "query_jira", "args": args}]
 
         for pattern in patterns:
             if any(kw in message_lower for kw in pattern["keywords"]):
@@ -343,7 +350,7 @@ Example: [{{"tool": "list_buckets", "args": {{}}}}]
             "s3": ["list_buckets"],
             "jira": ["list_projects"],
             "mysql": ["list_tables"],
-            "google_workspace": ["get_events", "list_messages", "search_drive_files"],
+            "google_workspace": ["get_events"],  # Only calendar for ultra-fast, let Claude handle searches
             "shopify": ["list_orders", "list_products"],
             "slack": ["list_channels", "list_users"],
             "github": ["list_repositories"],

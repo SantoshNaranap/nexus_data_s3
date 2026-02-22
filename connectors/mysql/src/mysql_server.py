@@ -23,6 +23,22 @@ logger = logging.getLogger("mysql-mcp-server")
 app = Server("mysql-connector")
 
 
+def _sanitize_identifier(name: str) -> str:
+    """
+    Sanitize SQL identifiers (table/database names) to prevent SQL injection.
+    Only allows alphanumeric characters and underscores.
+    """
+    if not name:
+        raise ValueError("Identifier cannot be empty")
+    # Remove any backticks that could break out of quoting
+    sanitized = name.replace("`", "")
+    # Only allow safe characters: alphanumeric, underscore, hyphen
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', sanitized):
+        raise ValueError(f"Invalid identifier: {name}. Only alphanumeric characters, underscores, and hyphens allowed.")
+    return sanitized
+
+
 def get_connection():
     """Create and return a MySQL connection."""
     return mysql.connector.connect(
@@ -191,7 +207,8 @@ async def handle_list_tables(arguments: dict[str, Any]) -> list[TextContent]:
     try:
         database = arguments.get("database")
         if database:
-            cursor.execute(f"USE `{database}`")
+            safe_db = _sanitize_identifier(database)
+            cursor.execute(f"USE `{safe_db}`")
 
         cursor.execute("SHOW TABLES")
         tables = [row[0] for row in cursor.fetchall()]
@@ -218,27 +235,29 @@ async def handle_describe_table(arguments: dict[str, Any]) -> list[TextContent]:
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _sanitize_identifier(arguments["table"])
         database = arguments.get("database")
 
         if database:
-            cursor.execute(f"USE `{database}`")
+            safe_db = _sanitize_identifier(database)
+            cursor.execute(f"USE `{safe_db}`")
 
         cursor.execute(f"DESCRIBE `{table}`")
         columns = cursor.fetchall()
 
-        # Get foreign keys
+        # Get foreign keys - use parameterized query for table name
         cursor.execute(
-            f"""
+            """
             SELECT
                 COLUMN_NAME,
                 REFERENCED_TABLE_NAME,
                 REFERENCED_COLUMN_NAME
             FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
             WHERE TABLE_SCHEMA = DATABASE()
-                AND TABLE_NAME = '{table}'
+                AND TABLE_NAME = %s
                 AND REFERENCED_TABLE_NAME IS NOT NULL
-        """
+        """,
+            (table,)
         )
         foreign_keys = cursor.fetchall()
 
@@ -297,17 +316,18 @@ async def handle_get_table_stats(arguments: dict[str, Any]) -> list[TextContent]
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _sanitize_identifier(arguments["table"])
         database = arguments.get("database")
 
         if database:
-            cursor.execute(f"USE `{database}`")
+            safe_db = _sanitize_identifier(database)
+            cursor.execute(f"USE `{safe_db}`")
 
         # Get row count
         cursor.execute(f"SELECT COUNT(*) as row_count FROM `{table}`")
         row_count = cursor.fetchone()["row_count"]
 
-        # Get table status
+        # Get table status - table name is already sanitized so LIKE is safe
         cursor.execute(f"SHOW TABLE STATUS LIKE '{table}'")
         status = cursor.fetchone()
 
@@ -334,11 +354,12 @@ async def handle_get_table_indexes(arguments: dict[str, Any]) -> list[TextConten
     cursor = conn.cursor(dictionary=True)
 
     try:
-        table = arguments["table"]
+        table = _sanitize_identifier(arguments["table"])
         database = arguments.get("database")
 
         if database:
-            cursor.execute(f"USE `{database}`")
+            safe_db = _sanitize_identifier(database)
+            cursor.execute(f"USE `{safe_db}`")
 
         cursor.execute(f"SHOW INDEX FROM `{table}`")
         indexes = cursor.fetchall()

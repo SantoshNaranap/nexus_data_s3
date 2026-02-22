@@ -1,13 +1,14 @@
-import { useState, useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { useState, useEffect, useCallback } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { datasourceApi, credentialsApi } from './services/api'
+import { datasourceApi, credentialsApi, oauthApi, type OAuthConnectionStatus } from './services/api'
 import DataSourceSidebar from './components/DataSourceSidebar'
 import ChatInterface from './components/ChatInterface'
 import SettingsPanel from './components/SettingsPanel'
 import UserMenu from './components/UserMenu'
 import ProtectedRoute from './components/ProtectedRoute'
 import LoginPage from './pages/LoginPage'
+import { ErrorBoundary, ChatErrorBoundary, SidebarErrorBoundary } from './components/ErrorBoundary'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import type { DataSource } from './types'
@@ -15,20 +16,101 @@ import type { DataSource } from './types'
 function AppContent() {
   const [selectedDatasource, setSelectedDatasource] = useState<DataSource | null>(null)
   const [configuredDatasources, setConfiguredDatasources] = useState<Set<string>>(new Set())
+  const [oauthConnections, setOauthConnections] = useState<Map<string, OAuthConnectionStatus>>(new Map())
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
+  const [oauthMessage, setOauthMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const { theme, toggleTheme } = useTheme()
   const { user, isAuthenticated } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   const { data: datasources, isLoading } = useQuery({
     queryKey: ['datasources'],
     queryFn: datasourceApi.list,
   })
 
+  // Fetch OAuth connections for all providers
+  const fetchOAuthConnections = useCallback(async () => {
+    if (!isAuthenticated || !user) return
+
+    try {
+      console.log(`[App] Fetching OAuth connections for user: ${user.email}`)
+      const connections = await oauthApi.getConnections()
+      const connectionMap = new Map<string, OAuthConnectionStatus>()
+
+      for (const conn of connections) {
+        connectionMap.set(conn.provider, {
+          connected: true,
+          provider: conn.provider,
+          provider_email: conn.provider_email || undefined,
+          expires_at: conn.expires_at || undefined,
+          needs_refresh: conn.needs_refresh,
+        })
+      }
+
+      setOauthConnections(connectionMap)
+
+      // Also add OAuth-connected providers to configured datasources
+      setConfiguredDatasources((prev) => {
+        const updated = new Set(prev)
+        for (const provider of connectionMap.keys()) {
+          updated.add(provider)
+        }
+        return updated
+      })
+
+      console.log(`[App] OAuth connections loaded for ${user.email}:`, Array.from(connectionMap.keys()))
+    } catch (error) {
+      console.error('[App] Failed to fetch OAuth connections:', error)
+    }
+  }, [isAuthenticated, user])
+
+  // Handle OAuth callback URL parameters
+  useEffect(() => {
+    const oauthStatus = searchParams.get('oauth')
+    const provider = searchParams.get('provider')
+    const error = searchParams.get('error')
+
+    if (oauthStatus === 'success' && provider) {
+      setOauthMessage({ type: 'success', text: `Successfully connected to ${provider.replace('_', ' ')}!` })
+      // Refresh OAuth connections
+      fetchOAuthConnections()
+      // Open settings panel to show the connection
+      setSettingsPanelOpen(true)
+      // Clear URL params
+      setSearchParams({})
+    } else if (oauthStatus === 'error') {
+      setOauthMessage({ type: 'error', text: error || 'OAuth connection failed. Please try again.' })
+      setSettingsPanelOpen(true)
+      setSearchParams({})
+    }
+
+    // Auto-dismiss message after 5 seconds
+    if (oauthMessage) {
+      const timer = setTimeout(() => setOauthMessage(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [searchParams, setSearchParams, fetchOAuthConnections, oauthMessage])
+
+  // Fetch OAuth connections on mount
+  useEffect(() => {
+    fetchOAuthConnections()
+  }, [fetchOAuthConnections])
+
   // Check which datasources already have credentials saved
+  // Clear configured datasources when user changes (important for credential isolation!)
+  useEffect(() => {
+    // When user changes (login/logout/switch), reset credential state
+    console.log(`[App] User changed to: ${user?.email || 'none'}, clearing credential state`)
+    setConfiguredDatasources(new Set())
+    setOauthConnections(new Map())
+  }, [user?.id])
+
   useEffect(() => {
     async function checkExistingCredentials() {
-      if (!datasources || !isAuthenticated) return
+      if (!datasources || !isAuthenticated || !user) return
 
+      console.log(`[App] Checking credentials for user: ${user.email}`)
       const configured = new Set<string>()
 
       // Check each datasource for existing credentials
@@ -38,7 +120,7 @@ function AppContent() {
             const status = await credentialsApi.checkStatus(ds.id)
             if (status.configured) {
               configured.add(ds.id)
-              console.log(`[App] ${ds.id} already configured`)
+              console.log(`[App] ${ds.id} already configured for ${user.email}`)
             }
           } catch (error) {
             console.error(`[App] Failed to check ${ds.id} credentials:`, error)
@@ -47,15 +129,32 @@ function AppContent() {
       )
 
       setConfiguredDatasources(configured)
-      console.log('[App] Configured datasources:', Array.from(configured))
+      console.log(`[App] Configured datasources for ${user.email}:`, Array.from(configured))
     }
 
     checkExistingCredentials()
-  }, [datasources, isAuthenticated])
+  }, [datasources, isAuthenticated, user?.id])
 
   const handleSelectDatasource = (datasource: DataSource) => {
     setSelectedDatasource(datasource)
   }
+
+  // Handle OAuth disconnect
+  const handleOAuthDisconnect = useCallback((provider: string) => {
+    // Remove from OAuth connections
+    setOauthConnections((prev) => {
+      const updated = new Map(prev)
+      updated.delete(provider)
+      return updated
+    })
+    // Remove from configured datasources
+    setConfiguredDatasources((prev) => {
+      const updated = new Set(prev)
+      updated.delete(provider)
+      return updated
+    })
+    console.log(`[App] Disconnected from ${provider}`)
+  }, [])
 
   const handleSaveCredentials = async (
     datasource: string,
@@ -85,14 +184,16 @@ function AppContent() {
 
   return (
     <div className="flex h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-white transition-colors duration-200">
-      <DataSourceSidebar
-        datasources={datasources || []}
-        selectedDatasource={selectedDatasource}
-        onSelectDatasource={handleSelectDatasource}
-        onOpenSettings={() => setSettingsPanelOpen(true)}
-        configuredDatasources={configuredDatasources}
-        isLoading={isLoading}
-      />
+      <SidebarErrorBoundary>
+        <DataSourceSidebar
+          datasources={datasources || []}
+          selectedDatasource={selectedDatasource}
+          onSelectDatasource={handleSelectDatasource}
+          onOpenSettings={() => setSettingsPanelOpen(true)}
+          configuredDatasources={configuredDatasources}
+          isLoading={isLoading}
+        />
+      </SidebarErrorBoundary>
 
       {/* Settings Panel */}
       <SettingsPanel
@@ -101,7 +202,37 @@ function AppContent() {
         onClose={() => setSettingsPanelOpen(false)}
         onSave={handleSaveCredentials}
         configuredDatasources={configuredDatasources}
+        oauthConnections={oauthConnections}
+        onOAuthDisconnect={handleOAuthDisconnect}
       />
+
+      {/* OAuth Success/Error Toast */}
+      {oauthMessage && (
+        <div className={`fixed bottom-4 right-4 z-50 px-6 py-4 rounded-lg shadow-lg flex items-center space-x-3 ${
+          oauthMessage.type === 'success'
+            ? 'bg-green-600 text-white'
+            : 'bg-red-600 text-white'
+        }`}>
+          {oauthMessage.type === 'success' ? (
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          ) : (
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          )}
+          <span>{oauthMessage.text}</span>
+          <button
+            onClick={() => setOauthMessage(null)}
+            className="ml-2 hover:opacity-75"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col">
         {/* Google-style Header */}
@@ -150,7 +281,9 @@ function AppContent() {
         </header>
 
         {selectedDatasource ? (
-          <ChatInterface datasource={selectedDatasource} />
+          <ChatErrorBoundary>
+            <ChatInterface datasource={selectedDatasource} />
+          </ChatErrorBoundary>
         ) : (
           <div className="flex-1 flex items-center justify-center p-8 bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
             <div className="text-center max-w-3xl">
@@ -230,17 +363,20 @@ function MainApp() {
 
 function App() {
   return (
-    <BrowserRouter>
-      <ThemeProvider>
-        <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/" element={<MainApp />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </ThemeProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <ThemeProvider>
+          <AuthProvider>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/" element={<MainApp />} />
+              <Route path="/signup" element={<LoginPage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </AuthProvider>
+        </ThemeProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   )
 }
 

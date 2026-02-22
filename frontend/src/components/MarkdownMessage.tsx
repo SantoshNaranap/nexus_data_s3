@@ -1,48 +1,52 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
+import { cleanContent } from '../utils/contentCleaner'
 
 interface MarkdownMessageProps {
   content: string
 }
 
 export default function MarkdownMessage({ content }: MarkdownMessageProps) {
+  // Clean the content to remove emojis and AI-ish patterns
+  const cleanedContent = cleanContent(content)
+
   const components: Components = {
-    // Paragraphs
+    // Paragraphs - cleaner spacing
     p: ({ children }) => (
-      <p className="mb-3 last:mb-0 leading-7">{children}</p>
+      <p className="mb-4 last:mb-0 leading-relaxed text-gray-800 dark:text-gray-200">{children}</p>
     ),
 
-    // Headings
+    // Headings - more subtle, professional look
     h1: ({ children }) => (
-      <h1 className="text-2xl font-semibold mb-3 mt-4 first:mt-0">{children}</h1>
+      <h1 className="text-xl font-semibold mb-3 mt-5 first:mt-0 text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">{children}</h1>
     ),
     h2: ({ children }) => (
-      <h2 className="text-xl font-semibold mb-3 mt-4 first:mt-0">{children}</h2>
+      <h2 className="text-lg font-semibold mb-3 mt-5 first:mt-0 text-gray-900 dark:text-white">{children}</h2>
     ),
     h3: ({ children }) => (
-      <h3 className="text-lg font-semibold mb-2 mt-3 first:mt-0">{children}</h3>
+      <h3 className="text-base font-semibold mb-2 mt-4 first:mt-0 text-gray-900 dark:text-white">{children}</h3>
     ),
 
-    // Lists
+    // Lists - cleaner bullets
     ul: ({ children }) => (
-      <ul className="list-disc list-outside ml-4 mb-3 space-y-1">{children}</ul>
+      <ul className="list-disc list-outside ml-5 mb-4 space-y-1.5 text-gray-800 dark:text-gray-200">{children}</ul>
     ),
     ol: ({ children }) => (
-      <ol className="list-decimal list-outside ml-4 mb-3 space-y-1">{children}</ol>
+      <ol className="list-decimal list-outside ml-5 mb-4 space-y-1.5 text-gray-800 dark:text-gray-200">{children}</ol>
     ),
     li: ({ children }) => (
-      <li className="leading-7">{children}</li>
+      <li className="leading-relaxed pl-1">{children}</li>
     ),
 
-    // Code blocks
+    // Code blocks - cleaner look
     code: ({ className, children, ...props }) => {
       const isInline = !className
 
       if (isInline) {
         return (
           <code
-            className="bg-gray-100 dark:bg-gray-800 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded text-sm font-mono"
+            className="bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-1.5 py-0.5 rounded text-sm font-mono"
             {...props}
           >
             {children}
@@ -52,7 +56,7 @@ export default function MarkdownMessage({ content }: MarkdownMessageProps) {
 
       return (
         <code
-          className={`${className} block bg-gray-900 dark:bg-gray-950 text-gray-100 p-4 rounded-lg my-3 overflow-x-auto font-mono text-sm leading-6`}
+          className={`${className} block bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-gray-200 p-4 rounded-lg my-4 overflow-x-auto font-mono text-sm leading-relaxed border border-gray-200 dark:border-gray-700`}
           {...props}
         >
           {children}
@@ -61,51 +65,51 @@ export default function MarkdownMessage({ content }: MarkdownMessageProps) {
     },
 
     pre: ({ children }) => (
-      <pre className="bg-gray-900 dark:bg-gray-950 rounded-lg my-3 overflow-hidden">
+      <pre className="bg-gray-50 dark:bg-gray-800 rounded-lg my-4 overflow-hidden border border-gray-200 dark:border-gray-700">
         {children}
       </pre>
     ),
 
-    // Blockquotes
+    // Blockquotes - subtle styling
     blockquote: ({ children }) => (
-      <blockquote className="border-l-4 border-gray-300 dark:border-gray-700 pl-4 my-3 italic text-gray-700 dark:text-gray-300">
+      <blockquote className="border-l-3 border-gray-300 dark:border-gray-600 pl-4 my-4 text-gray-600 dark:text-gray-400">
         {children}
       </blockquote>
     ),
 
-    // Tables
+    // Tables - clean, minimal design
     table: ({ children }) => (
-      <div className="overflow-x-auto my-3">
-        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+      <div className="overflow-x-auto my-4 rounded-lg border border-gray-200 dark:border-gray-700">
+        <table className="min-w-full">
           {children}
         </table>
       </div>
     ),
     thead: ({ children }) => (
-      <thead className="bg-gray-50 dark:bg-gray-800">{children}</thead>
+      <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">{children}</thead>
     ),
     tbody: ({ children }) => (
-      <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+      <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
         {children}
       </tbody>
     ),
-    tr: ({ children }) => <tr>{children}</tr>,
+    tr: ({ children }) => <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">{children}</tr>,
     th: ({ children }) => (
-      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
         {children}
       </th>
     ),
     td: ({ children }) => (
-      <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">
+      <td className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
         {children}
       </td>
     ),
 
-    // Links
+    // Links - subtle
     a: ({ children, href }) => (
       <a
         href={href}
-        className="text-blue-600 dark:text-blue-400 hover:underline"
+        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline decoration-blue-300 dark:decoration-blue-600 underline-offset-2"
         target="_blank"
         rel="noopener noreferrer"
       >
@@ -113,29 +117,29 @@ export default function MarkdownMessage({ content }: MarkdownMessageProps) {
       </a>
     ),
 
-    // Horizontal rule
+    // Horizontal rule - subtle
     hr: () => (
-      <hr className="my-4 border-gray-200 dark:border-gray-700" />
+      <hr className="my-6 border-gray-200 dark:border-gray-700" />
     ),
 
     // Strong/Bold
     strong: ({ children }) => (
-      <strong className="font-semibold">{children}</strong>
+      <strong className="font-semibold text-gray-900 dark:text-white">{children}</strong>
     ),
 
     // Emphasis/Italic
     em: ({ children }) => (
-      <em className="italic">{children}</em>
+      <em className="italic text-gray-700 dark:text-gray-300">{children}</em>
     ),
   }
 
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none">
+    <div className="text-sm leading-relaxed">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={components}
       >
-        {content}
+        {cleanedContent}
       </ReactMarkdown>
     </div>
   )

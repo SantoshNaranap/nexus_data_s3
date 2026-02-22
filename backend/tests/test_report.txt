@@ -1,0 +1,70 @@
+======================================================================
+COMPREHENSIVE TEST REPORT - ConnectorMCP
+======================================================================
+
+Test Run: 2025-12-16T19:22:00.525994 to 2025-12-16T19:25:08.724129
+
+## SUMMARY
+----------------------------------------
+Total Tests:  14
+Passed:       11 (78.6%)
+Failed:       1
+Warnings:     2
+
+## DISCOVERED DATA
+----------------------------------------
+
+## FAILED TESTS
+----------------------------------------
+
+[FAILED] Slack: Empty query handling
+  Query:    
+  Duration: 294ms
+  Issue: Request error: HTTP 500: {"detail":"Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'messages: text content blocks must contain non-whitespace text'}, 'request_id': 'req_011CWBYYKsDRcrRJXUL3LeQ1'}"}
+
+## WARNINGS
+----------------------------------------
+
+[WARNING] Slack: Non-existent person
+  Query: What is Zyxwvutsrq McFakename working on?
+  Issue: Expected error but got a response
+  Issue: Missing expected content: 'not found'
+
+[WARNING] JIRA: Non-existent person
+  Query: What is Fakeperson Notreal working on?
+  Issue: Expected error but got a response
+  Issue: Missing expected content: 'not found'
+
+## ALL TEST RESULTS
+----------------------------------------
+
+### SLACK
+Pass Rate: 5/7 (71%)
+
+⚠ [WARNING] Slack: Non-existent person (7988ms)
+    - Expected error but got a response
+    - Missing expected content: 'not found'
+✓ [PASSED] Slack: List channels (28529ms)
+✓ [PASSED] Slack: Read general channel (16632ms)
+✓ [PASSED] Slack: Search for keyword (14506ms)
+✓ [PASSED] Slack: Potentially ambiguous name (6422ms)
+✗ [FAILED] Slack: Empty query handling (294ms)
+    - Request error: HTTP 500: {"detail":"Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'messages: text content blocks must contain non-whitespace text'}, 'request_id': 'req_011CWBYYKsDRcrRJXUL3LeQ1'}"}
+✓ [PASSED] Slack: Unicode name handling (8489ms)
+
+### JIRA
+Pass Rate: 6/7 (86%)
+
+✓ [PASSED] JIRA: Projects behind schedule (14993ms)
+✓ [PASSED] JIRA: Overdue issues (8789ms)
+✓ [PASSED] JIRA: Blocked issues (7357ms)
+✓ [PASSED] JIRA: Bug count (12800ms)
+✓ [PASSED] JIRA: In review issues (7622ms)
+⚠ [WARNING] JIRA: Non-existent person (5846ms)
+    - Expected error but got a response
+    - Missing expected content: 'not found'
+✓ [PASSED] JIRA: Special characters in query (9292ms)
+
+======================================================================
+END OF REPORT
+======================================================================
